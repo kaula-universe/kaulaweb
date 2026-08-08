@@ -1,0 +1,504 @@
+// ============================================================
+// WebUI Framework - App Module
+// Page document builder, router, and HTTP server integration
+// ============================================================
+
+import std.string
+import std.container
+import std.web
+import std.io
+import "styles.kl"
+import "elements.kl"
+import "components.kl"
+
+// ==================== Route Handler Type ====================
+
+// A PageHandler returns the main body Element for a given request
+// typedefs in Kaula use function pointer conventions via C interop
+// but for simplicity we store matching info directly.
+
+// ==================== Page Builder ====================
+
+class Page {
+    title: string
+    lang: string
+    meta_description: string
+    meta_keywords: string
+    author: string
+    viewport: string
+    favicon: string
+    head_extra: string
+    stylesheet: StyleSheet*
+    custom_css_links: Vector*      // Vector of char* URLs
+    custom_js_scripts: Vector*     // Vector of char* URLs (head)
+    custom_js_body: Vector*        // Vector of char* URLs (end of body)
+    inline_scripts_head: string
+    inline_scripts_body: string
+    body_children: Vector*         // Vector of Element*
+    body_style: Style*
+
+    constructor(string page_title) {
+        self.title = string_create(page_title)
+        self.lang = string_create("en")
+        self.meta_description = ""
+        self.meta_keywords = ""
+        self.author = ""
+        self.viewport = string_create("width=device-width, initial-scale=1.0")
+        self.favicon = ""
+        self.head_extra = ""
+        self.stylesheet = null
+        self.custom_css_links = vector_create(4)
+        self.custom_js_scripts = vector_create(4)
+        self.custom_js_body = vector_create(4)
+        self.inline_scripts_head = ""
+        self.inline_scripts_body = ""
+        self.body_children = vector_create(16)
+        self.body_style = (webui_style()
+            .bg("#f3f4f6")
+            .color("#1f2937")
+            .min_height("100vh"))
+    }
+
+    // ---- Metadata ----
+
+    fn set_title(string t) Page { self.title = string_create(t); return self }
+    fn set_lang(string l) Page { self.lang = string_create(l); return self }
+    fn set_description(string d) Page { self.meta_description = string_create(d); return self }
+    fn set_keywords(string k) Page { self.meta_keywords = string_create(k); return self }
+    fn set_author(string a) Page { self.author = string_create(a); return self }
+    fn set_viewport(string v) Page { self.viewport = string_create(v); return self }
+    fn set_favicon(string f) Page { self.favicon = string_create(f); return self }
+    fn set_head_extra(string e) Page { self.head_extra = string_create(e); return self }
+    fn use_stylesheet(StyleSheet* ss) Page { self.stylesheet = ss; return self }
+    fn use_tailwind_like() Page {
+        if (self.stylesheet == null) self.stylesheet = webui_stylesheet()
+        self.stylesheet.add_tailwind_like_utilities()
+        return self
+    }
+    fn use_default_styles() Page {
+        if (self.stylesheet == null) self.stylesheet = webui_stylesheet()
+        self.stylesheet.add_default_utilities()
+        return self
+    }
+
+    // ---- Assets ----
+
+    fn add_css_link(string href) Page {
+        auto s = string_create(href)
+        vector_push_back(self.custom_css_links, s.ptr)
+        return self
+    }
+
+    fn add_js_head(string src) Page {
+        auto s = string_create(src)
+        vector_push_back(self.custom_js_scripts, s.ptr)
+        return self
+    }
+
+    fn add_js_body(string src) Page {
+        auto s = string_create(src)
+        vector_push_back(self.custom_js_body, s.ptr)
+        return self
+    }
+
+    fn add_inline_script_head(string js) Page {
+        auto s = string_create(js)
+        self.inline_scripts_head = string_concat(self.inline_scripts_head, s)
+        return self
+    }
+
+    fn add_inline_script_body(string js) Page {
+        auto s = string_create(js)
+        self.inline_scripts_body = string_concat(self.inline_scripts_body, s)
+        return self
+    }
+
+    // ---- Body content ----
+
+    fn push(Element* child) Page {
+        if (child != null) vector_push_back(self.body_children, child)
+        return self
+    }
+
+    fn push_element(Element child) Page {
+        auto copy = std.memory.std_malloc(sizeof(Element)): Element*
+        *copy = child
+        vector_push_back(self.body_children, copy)
+        return self
+    }
+
+    fn set_body_style(Style* s) Page { self.body_style = s; return self }
+
+    // ---- Full document rendering ----
+
+    fn render_document() string {
+        auto doc = div() // dummy top-level for rendering helper
+
+        auto sb = string_builder_create()
+
+        // Doctype + html open
+        string_builder_append(sb, "<!DOCTYPE html>\n<html lang=\"")
+        string_builder_append(sb, self.lang.ptr)
+        string_builder_append(sb, "\">\n<head>\n")
+
+        // Meta tags
+        string_builder_append(sb, "  <meta charset=\"UTF-8\" />\n")
+        if (self.viewport.len > 0) {
+            string_builder_append(sb, "  <meta name=\"viewport\" content=\"")
+            string_builder_append(sb, self.viewport.ptr)
+            string_builder_append(sb, "\" />\n")
+        }
+        if (self.meta_description.len > 0) {
+            string_builder_append(sb, "  <meta name=\"description\" content=\"")
+            string_builder_append(sb, self.meta_description.ptr)
+            string_builder_append(sb, "\" />\n")
+        }
+        if (self.meta_keywords.len > 0) {
+            string_builder_append(sb, "  <meta name=\"keywords\" content=\"")
+            string_builder_append(sb, self.meta_keywords.ptr)
+            string_builder_append(sb, "\" />\n")
+        }
+        if (self.author.len > 0) {
+            string_builder_append(sb, "  <meta name=\"author\" content=\"")
+            string_builder_append(sb, self.author.ptr)
+            string_builder_append(sb, "\" />\n")
+        }
+        if (self.favicon.len > 0) {
+            string_builder_append(sb, "  <link rel=\"icon\" href=\"")
+            string_builder_append(sb, self.favicon.ptr)
+            string_builder_append(sb, "\" />\n")
+        }
+
+        // Title
+        string_builder_append(sb, "  <title>")
+        string_builder_append(sb, self.title.ptr)
+        string_builder_append(sb, "</title>\n")
+
+        // CSS links
+        auto css_count = vector_size(self.custom_css_links)
+        for (auto i = 0; i < css_count; i++) {
+            auto href = vector_get(self.custom_css_links, i): char*
+            if (href != null) {
+                string_builder_append(sb, "  <link rel=\"stylesheet\" href=\"")
+                string_builder_append(sb, href)
+                string_builder_append(sb, "\" />\n")
+            }
+        }
+
+        // Head JS links
+        auto js_head_count = vector_size(self.custom_js_scripts)
+        for (auto i = 0; i < js_head_count; i++) {
+            auto src = vector_get(self.custom_js_scripts, i): char*
+            if (src != null) {
+                string_builder_append(sb, "  <script src=\"")
+                string_builder_append(sb, src)
+                string_builder_append(sb, "\"></script>\n")
+            }
+        }
+
+        // Inline head scripts
+        if (self.inline_scripts_head.len > 0) {
+            string_builder_append(sb, "  <script>\n")
+            string_builder_append(sb, self.inline_scripts_head.ptr)
+            string_builder_append(sb, "\n  </script>\n")
+        }
+
+        // Stylesheet tag
+        if (self.stylesheet != null) {
+            auto css_tag = self.stylesheet.build_tag()
+            string_builder_append(sb, "  ")
+            string_builder_append(sb, css_tag.ptr)
+        }
+
+        // Extra head HTML
+        if (self.head_extra.len > 0) {
+            string_builder_append(sb, self.head_extra.ptr)
+        }
+
+        string_builder_append(sb, "</head>\n<body")
+
+        // Body inline style
+        if (self.body_style != null) {
+            auto bs = self.body_style.build_inline()
+            if (bs.len > 0) {
+                string_builder_append_char(sb, ' ')
+                string_builder_append(sb, bs.ptr)
+            }
+        }
+
+        string_builder_append(sb, ">\n")
+
+        // Body children
+        auto body_count = vector_size(self.body_children)
+        for (auto i = 0; i < body_count; i++) {
+            auto child = vector_get(self.body_children, i): Element*
+            if (child != null) {
+                child.render_into(sb)
+                string_builder_append_char(sb, '\n')
+            }
+        }
+
+        // End-of-body JS links
+        auto js_body_count = vector_size(self.custom_js_body)
+        for (auto i = 0; i < js_body_count; i++) {
+            auto src = vector_get(self.custom_js_body, i): char*
+            if (src != null) {
+                string_builder_append(sb, "  <script src=\"")
+                string_builder_append(sb, src)
+                string_builder_append(sb, "\"></script>\n")
+            }
+        }
+
+        // Inline body scripts
+        if (self.inline_scripts_body.len > 0) {
+            string_builder_append(sb, "  <script>\n")
+            string_builder_append(sb, self.inline_scripts_body.ptr)
+            string_builder_append(sb, "\n  </script>\n")
+        }
+
+        string_builder_append(sb, "</body>\n</html>\n")
+
+        auto result = string_builder_to_string(sb)
+        string_builder_destroy(sb)
+        return result
+    }
+}
+
+// ==================== Simple Router ====================
+
+// Route entry: path + handler that returns Page* or HTML string
+struct Route {
+    path: string
+    method: HttpMethod   // HTTP_GET, HTTP_POST, ... (use int via web.h values)
+    type_: int           // 0 = page handler, 1 = raw string handler, 2 = json, 3 = redirect
+    data: void*          // payload depending on type_
+}
+
+// Handler types:
+// type_ 0 -> Page* (*fn)(HttpRequest* req)
+// type_ 1 -> char* (*fn)(HttpRequest* req)     // raw HTML
+// type_ 2 -> char* (*fn)(HttpRequest* req)     // JSON (sets content type)
+// type_ 3 -> char* redirect URL (static)
+typedef Page* (*RoutePageHandler)(HttpRequest* req)
+typedef char* (*RouteRawHandler)(HttpRequest* req)
+
+class Router {
+    routes: Vector*   // Vector of Route*
+    not_found_page: Page*
+    not_found_raw: string
+
+    constructor() {
+        self.routes = vector_create(32)
+        self.not_found_page = null
+        self.not_found_raw = string_create("<html><body><h1>404 Not Found</h1></body></html>")
+    }
+
+    // Register a GET page handler
+    fn get_page(string path, RoutePageHandler handler) Router {
+        return self._add_route(path, 0, handler, HTTP_GET)
+    }
+    // Register a POST page handler
+    fn post_page(string path, RoutePageHandler handler) Router {
+        return self._add_route(path, 0, handler, HTTP_POST)
+    }
+    // Register a GET raw handler (returns HTML string via char*)
+    fn get_raw(string path, RouteRawHandler handler) Router {
+        return self._add_route(path, 1, handler, HTTP_GET)
+    }
+    fn post_raw(string path, RouteRawHandler handler) Router {
+        return self._add_route(path, 1, handler, HTTP_POST)
+    }
+    // Register a GET JSON handler
+    fn get_json(string path, RouteRawHandler handler) Router {
+        return self._add_route(path, 2, handler, HTTP_GET)
+    }
+    fn post_json(string path, RouteRawHandler handler) Router {
+        return self._add_route(path, 2, handler, HTTP_POST)
+    }
+    // Register a static redirect
+    fn redirect(string path, string target) Router {
+        return self._add_route(path, 3, string_create(target).ptr, HTTP_GET)
+    }
+
+    fn set_404_page(Page* p) Router { self.not_found_page = p; return self }
+    fn set_404_raw(string html) Router { self.not_found_raw = string_create(html); return self }
+
+    fn _add_route(string path, int type, void* data, HttpMethod method) Router {
+        auto r = std.memory.std_malloc(sizeof(Route)): Route*
+        r.path = string_create(path)
+        r.method = method
+        r.type_ = type
+        r.data = data
+        vector_push_back(self.routes, r)
+        return self
+    }
+
+    // Handle an incoming request; write to HttpResponse
+    fn handle(HttpRequest* req, HttpResponse* res) void {
+        auto path = req.path
+        auto method = req.method
+        auto count = vector_size(self.routes)
+
+        // Find matching route
+        for (auto i = 0; i < count; i++) {
+            auto r = vector_get(self.routes, i): Route*
+            if (r == null) continue
+            if (r.method != method) continue
+            // Simple exact match for now
+            if (path != null && strcmp(r.path.ptr, path) == 0) {
+                self._dispatch(r, req, res)
+                return
+            }
+        }
+
+        // Not found
+        http_response_set_status(res, HTTP_NOT_FOUND)
+        if (self.not_found_page != null) {
+            http_response_set_content_type(res, "text/html")
+            auto html = self.not_found_page.render_document()
+            http_response_set_html(res, html.ptr)
+        } else {
+            http_response_set_content_type(res, "text/html")
+            http_response_set_html(res, self.not_found_raw.ptr)
+        }
+    }
+
+    fn _dispatch(Route* r, HttpRequest* req, HttpResponse* res) void {
+        match r.type_ {
+            0 => {  // Page handler
+                auto handler = r.data: RoutePageHandler
+                if (handler != null) {
+                    Page* page = handler(req)
+                    if (page != null) {
+                        http_response_set_status(res, HTTP_OK)
+                        http_response_set_content_type(res, "text/html")
+                        auto html = page.render_document()
+                        http_response_set_html(res, html.ptr)
+                    } else {
+                        http_response_set_status(res, HTTP_INTERNAL_SERVER_ERROR)
+                        http_response_set_content_type(res, "text/plain")
+                        http_response_set_body(res, "500 Page handler returned null", 0)
+                    }
+                }
+            },
+            1 => {  // Raw HTML handler
+                auto handler = r.data: RouteRawHandler
+                if (handler != null) {
+                    auto html = handler(req)
+                    http_response_set_status(res, HTTP_OK)
+                    http_response_set_content_type(res, "text/html")
+                    if (html != null) {
+                        http_response_set_body(res, html, 0)
+                    } else {
+                        http_response_set_body(res, "", 0)
+                    }
+                }
+            },
+            2 => {  // JSON handler
+                auto handler = r.data: RouteRawHandler
+                if (handler != null) {
+                    auto json_str = handler(req)
+                    http_response_set_status(res, HTTP_OK)
+                    http_response_set_content_type(res, MIME_APP_JSON)
+                    if (json_str != null) {
+                        http_response_set_body(res, json_str, 0)
+                    } else {
+                        http_response_set_body(res, "{}", 0)
+                    }
+                }
+            },
+            3 => {  // Static redirect URL
+                auto url = r.data: char*
+                if (url != null) {
+                    http_response_set_redirect(res, url)
+                } else {
+                    http_response_set_status(res, HTTP_FOUND)
+                }
+            },
+        }
+    }
+}
+
+// ==================== WebApp: HTTP Server + Router glue ====================
+
+class WebApp {
+    server: HttpServer*
+    router: Router*
+    port: int
+    cors_origin: string
+    static_root: string
+    before_hook: void*   // void (*)(HttpRequest*, HttpResponse*)
+
+    constructor(int listen_port) {
+        self.port = listen_port
+        self.server = null
+        self.router = Router()
+        self.cors_origin = ""
+        self.static_root = ""
+    }
+
+    fn router_get() Router* { return self.router }
+
+    fn enable_cors(string origin) WebApp {
+        self.cors_origin = string_create(origin)
+        return self
+    }
+
+    fn set_static_root(string root) WebApp {
+        self.static_root = string_create(root)
+        return self
+    }
+
+    fn set_before_hook(void* hook) WebApp {
+        self.before_hook = hook
+        return self
+    }
+
+    fn run() void {
+        self.server = http_server_create(self.port)
+        if (self.server == null) {
+            println("[WebUI] Failed to create HTTP server on port ", self.port)
+            return
+        }
+        if (self.cors_origin.len > 0) {
+            http_server_enable_cors(self.server, self.cors_origin.ptr)
+        }
+        if (self.static_root.len > 0) {
+            http_server_set_document_root(self.server, self.static_root.ptr)
+        }
+        println("[WebUI] Listening on http://localhost:", self.port)
+        http_server_start(self.server, self._req_handler)
+        http_server_destroy(self.server)
+    }
+
+    fn _req_handler(HttpRequest* req, HttpResponse* res) void {
+        // Log request
+        auto m = http_method_to_string(req.method)
+        println("[WebUI] ", m, " ", req.path)
+
+        // Before hook if any
+        if (self.before_hook != null) {
+            // Cast and call
+            typedef void (*BeforeHook)(HttpRequest*, HttpResponse*)
+            auto hook = self.before_hook: BeforeHook
+            hook(req, res)
+        }
+
+        // Let router dispatch
+        self.router.handle(req, res)
+    }
+}
+
+// ==================== Factory shortcuts ====================
+
+fn webui_app(int port) WebApp {
+    return WebApp(port)
+}
+
+fn webui_page(string title) Page {
+    return Page(title)
+}
+
+fn webui_router() Router {
+    return Router()
+}
