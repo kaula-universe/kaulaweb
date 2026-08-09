@@ -35,10 +35,10 @@ class Style {
     css: string
     constructor() { self.css = string_create("") }
     fn append(string k, string v) void {
-        string a = string_concat(self.css, k)
-        string b = string_concat(a, string_create(":"))
-        string c = string_concat(b, v)
-        self.css = string_concat(c, string_create(";"))
+        string a = (self.css) + (k)
+        string b = (a) + (string_create(":"))
+        string c = (b) + (v)
+        self.css = (c) + (string_create(";"))
     }
     fn render() string { return self.css }
     fn bg(string c) void { self.append(string_create("background"), c) }
@@ -76,41 +76,41 @@ class Elem {
     fn set_style(Style s) void { self.style_str = s.render() }
     fn set_style_str(string s) void { self.style_str = s }
     fn set_attr(string a) void {
-        string sp = string_concat(self.attrs, string_create(" "))
-        self.attrs = string_concat(sp, a)
+        string sp = (self.attrs) + (string_create(" "))
+        self.attrs = (sp) + (a)
     }
-    fn add_html(string h) void { self.inner = string_concat(self.inner, h) }
+    fn add_html(string h) void { self.inner = (self.inner) + (h) }
     fn add(Elem child) void {
         string r = child.render()
-        self.inner = string_concat(self.inner, r)
+        self.inner = (self.inner) + (r)
     }
     fn render() string {
         bool empty = s_empty(self.tag)
         string out = string_create("")
         if (empty) {
         } else {
-            out = string_concat(out, string_create("<"))
-            out = string_concat(out, self.tag)
+            out = (out) + (string_create("<"))
+            out = (out) + (self.tag)
             if (s_empty(self.style_str)) {
             } else {
-                out = string_concat(out, string_create(" style=\""))
-                out = string_concat(out, self.style_str)
-                out = string_concat(out, string_create("\""))
+                out = (out) + (string_create(" style=\""))
+                out = (out) + (self.style_str)
+                out = (out) + (string_create("\""))
             }
             if (s_empty(self.attrs)) {
             } else {
-                out = string_concat(out, string_create(" "))
-                out = string_concat(out, self.attrs)
+                out = (out) + (string_create(" "))
+                out = (out) + (self.attrs)
             }
-            out = string_concat(out, string_create(">"))
+            out = (out) + (string_create(">"))
         }
-        out = string_concat(out, self.text)
-        out = string_concat(out, self.inner)
+        out = (out) + (self.text)
+        out = (out) + (self.inner)
         if (empty) {
         } else {
-            out = string_concat(out, string_create("</"))
-            out = string_concat(out, self.tag)
-            out = string_concat(out, string_create(">"))
+            out = (out) + (string_create("</"))
+            out = (out) + (self.tag)
+            out = (out) + (string_create(">"))
         }
         return out
     }
@@ -126,25 +126,25 @@ class Card {
     }
     fn set_title(string t) void { self.title = t }
     fn add_text(string t) void {
-        string s1 = string_concat(self.body_html, string_create("<p>"))
-        string s2 = string_concat(s1, t)
-        self.body_html = string_concat(s2, string_create("</p>"))
+        string s1 = (self.body_html) + (string_create("<p>"))
+        string s2 = (s1) + (t)
+        self.body_html = (s2) + (string_create("</p>"))
     }
-    fn add_html(string h) void { self.body_html = string_concat(self.body_html, h) }
+    fn add_html(string h) void { self.body_html = (self.body_html) + (h) }
     fn add_elem(Elem e) void {
         string r = e.render()
-        self.body_html = string_concat(self.body_html, r)
+        self.body_html = (self.body_html) + (r)
     }
     fn render() string {
         string out = string_create("<div class=\"card\">")
         if (s_empty(self.title)) {
         } else {
-            out = string_concat(out, string_create("<h3>"))
-            out = string_concat(out, self.title)
-            out = string_concat(out, string_create("</h3>"))
+            out = (out) + (string_create("<h3>"))
+            out = (out) + (self.title)
+            out = (out) + (string_create("</h3>"))
         }
-        out = string_concat(out, self.body_html)
-        out = string_concat(out, string_create("</div>"))
+        out = (out) + (self.body_html)
+        out = (out) + (string_create("</div>"))
         return out
     }
 }
@@ -159,18 +159,18 @@ class Navbar {
     }
     fn set_brand(string b) void { self.brand = b }
     fn add_link(string href, string label) void {
-        string s1 = string_concat(string_create("<a href=\""), href)
-        string s2 = string_concat(s1, string_create("\">"))
-        string s3 = string_concat(s2, label)
-        string link = string_concat(s3, string_create("</a>"))
-        self.links_html = string_concat(self.links_html, link)
+        string s1 = (string_create("<a href=\"")) + (href)
+        string s2 = (s1) + (string_create("\">"))
+        string s3 = (s2) + (label)
+        string link = (s3) + (string_create("</a>"))
+        self.links_html = (self.links_html) + (link)
     }
     fn render() string {
         string out = string_create("<nav class=\"nav\"><span class=\"brand\">")
-        out = string_concat(out, self.brand)
-        out = string_concat(out, string_create("</span><div class=\"nav-links\">"))
-        out = string_concat(out, self.links_html)
-        out = string_concat(out, string_create("</div></nav>"))
+        out = (out) + (self.brand)
+        out = (out) + (string_create("</span><div class=\"nav-links\">"))
+        out = (out) + (self.links_html)
+        out = (out) + (string_create("</div></nav>"))
         return out
     }
 }
@@ -181,8 +181,8 @@ class Footer {
     constructor(string t) { self.text = t }
     fn render() string {
         string out = string_create("<footer class=\"footer\"><p>")
-        out = string_concat(out, self.text)
-        out = string_concat(out, string_create("</p></footer>"))
+        out = (out) + (self.text)
+        out = (out) + (string_create("</p></footer>"))
         return out
     }
 }
@@ -192,35 +192,35 @@ class Page {
     title: string
     body_html: string
     footer_html: string
-    use_styles: size_t
+    use_styles: bool
     constructor() {
         self.title = string_create("")
         self.body_html = string_create("")
         self.footer_html = string_create("")
-        self.use_styles = SZ0
+        self.use_styles = false
     }
     fn set_title(string t) void { self.title = t }
-    fn use_default_styles() void { self.use_styles = SZ1 }
-    fn push_html(string h) void { self.body_html = string_concat(self.body_html, h) }
+    fn use_default_styles() void { self.use_styles = true }
+    fn push_html(string h) void { self.body_html = (self.body_html) + (h) }
     fn push(Elem e) void {
         string r = e.render()
-        self.body_html = string_concat(self.body_html, r)
+        self.body_html = (self.body_html) + (r)
     }
-    fn push_bottom_html(string h) void { self.footer_html = string_concat(self.footer_html, h) }
+    fn push_bottom_html(string h) void { self.footer_html = (self.footer_html) + (h) }
     fn render() string {
         string css = string_create("*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#f8fafc;color:#1e293b;line-height:1.6}.container{max-width:960px;margin:0 auto;padding:2rem}.nav{display:flex;justify-content:space-between;align-items:center;padding:1rem 2rem;background:#fff;border-bottom:2px solid #e2e8f0}.nav .brand{font-size:1.3rem;font-weight:700;color:#0ea5e9}.nav-links a{margin-left:1rem;text-decoration:none;color:#475569}.nav-links a:hover{color:#0ea5e9}.card{background:#fff;border-radius:12px;padding:1.5rem;margin-bottom:1rem;border:1px solid #e2e8f0}.card h3{color:#0ea5e9;margin-bottom:.5rem}.btn{display:inline-block;padding:.6rem 1.2rem;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:8px}.btn-alt{background:#64748b}.grid{display:grid;gap:1rem}.cols-2{grid-template-columns:repeat(2,1fr)}.cols-3{grid-template-columns:repeat(3,1fr)}@media(max-width:768px){.cols-2,.cols-3{grid-template-columns:1fr}}.footer{text-align:center;padding:2rem;color:#64748b;border-top:1px solid #e2e8f0;margin-top:2rem}.tag{display:inline-block;padding:.2rem .6rem;border-radius:6px;font-size:.8rem;background:#e0f2fe;color:#0369a1;margin:.2rem}.tag.g{background:#dcfce7;color:#16a34a}.tag.p{background:#fae8ff;color:#9333ea}.tag.y{background:#fef9c3;color:#a16207}.alert{padding:1rem;border-radius:8px;margin:1rem 0}.alert.ok{background:#dcfce7;color:#16a34a}.alert.bad{background:#fee2e2;color:#dc2626}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.5rem;border-bottom:1px solid #e2e8f0}th{color:#0ea5e9}input,textarea{width:100%;padding:.5rem;margin:.3rem 0;border:1px solid #cbd5e1;border-radius:6px}label{display:block;margin-top:.5rem;font-weight:600;color:#475569}h1{color:#0ea5e9;margin-bottom:1rem}p{margin-bottom:.5rem}")
         string html = string_create("<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1.0\"><title>")
-        html = string_concat(html, self.title)
-        html = string_concat(html, string_create("</title>"))
-        if (self.use_styles == SZ1) {
-            html = string_concat(html, string_create("<style>"))
-            html = string_concat(html, css)
-            html = string_concat(html, string_create("</style>"))
+        html = (html) + (self.title)
+        html = (html) + (string_create("</title>"))
+        if (self.use_styles) {
+            html = (html) + (string_create("<style>"))
+            html = (html) + (css)
+            html = (html) + (string_create("</style>"))
         }
-        html = string_concat(html, string_create("</head><body>"))
-        html = string_concat(html, self.body_html)
-        html = string_concat(html, self.footer_html)
-        html = string_concat(html, string_create("</body></html>"))
+        html = (html) + (string_create("</head><body>"))
+        html = (html) + (self.body_html)
+        html = (html) + (self.footer_html)
+        html = (html) + (string_create("</body></html>"))
         return html
     }
 }
@@ -466,15 +466,15 @@ fn build_contact_page(string ok_msg, string bad_msg, string p_name, string p_ema
     Card formcard = Card()
     formcard.set_title(string_create(""))
     string form = string_create("<form method=\"POST\" action=\"/contact\">")
-    form = string_concat(form, string_create("<label for=\"name\">Name</label><input id=\"name\" name=\"name\" type=\"text\" value=\""))
-    form = string_concat(form, p_name)
-    form = string_concat(form, string_create("\"><label for=\"email\">Email</label><input id=\"email\" name=\"email\" type=\"email\" value=\""))
-    form = string_concat(form, p_email)
-    form = string_concat(form, string_create("\"><label for=\"subject\">Subject</label><input id=\"subject\" name=\"subject\" type=\"text\" value=\""))
-    form = string_concat(form, p_subj)
-    form = string_concat(form, string_create("\"><label for=\"message\">Message</label><textarea id=\"message\" name=\"message\">"))
-    form = string_concat(form, p_msg)
-    form = string_concat(form, string_create("</textarea><div style=\"margin-top:1rem\"><button class=\"btn\" type=\"submit\">Send Message</button></div></form>"))
+    form = (form) + (string_create("<label for=\"name\">Name</label><input id=\"name\" name=\"name\" type=\"text\" value=\""))
+    form = (form) + (p_name)
+    form = (form) + (string_create("\"><label for=\"email\">Email</label><input id=\"email\" name=\"email\" type=\"email\" value=\""))
+    form = (form) + (p_email)
+    form = (form) + (string_create("\"><label for=\"subject\">Subject</label><input id=\"subject\" name=\"subject\" type=\"text\" value=\""))
+    form = (form) + (p_subj)
+    form = (form) + (string_create("\"><label for=\"message\">Message</label><textarea id=\"message\" name=\"message\">"))
+    form = (form) + (p_msg)
+    form = (form) + (string_create("</textarea><div style=\"margin-top:1rem\"><button class=\"btn\" type=\"submit\">Send Message</button></div></form>"))
     formcard.add_html(form)
     container.add_html(formcard.render())
 
@@ -512,7 +512,7 @@ fn build_404_page() string {
 // ========== Form helpers ==========
 fn form_value(string body, string key) string {
     if (s_empty(body)) { return string_create("") }
-    string needle = string_concat(key, string_create("="))
+    string needle = (key) + (string_create("="))
     size_t blen = string_length(body)
     size_t idx = string_index_of_string(body, needle)
     if (idx >= blen) { return string_create("") }
