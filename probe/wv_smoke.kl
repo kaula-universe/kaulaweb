@@ -1,0 +1,122 @@
+# wv_smoke.kl - webview FFI 冒烟探针
+# 验证链路: Kaula -> pkglib/webview C API -> 创建窗口 / set_html / bind 回调 / JS->native / native->JS
+# 附加验证: FFI 回调在 默认KMM vs #[no_kmm] 下持有字符串的存活行为（SOR/内存策略依据）
+import std.io
+import std.string
+import webview
+
+# 全局保存 webview 句柄（webview_t = void*，Kaula 记法 void()）
+# 回调由 C 侧事件循环触发，需要通过全局拿到句柄做 webview_return / webview_eval
+void() G_WV
+
+# 日志文件句柄（FILE*）。printf 重定向到文件时是全缓冲且不随强杀刷新，
+# 因此关键证据同时落盘到 wv_smoke.log（fwrite 无 stdio 缓冲问题）
+void() G_LOG
+
+# 跨回调存活测试: store_handler(默认KMM) 写入, check_handler(下一个回调) 读出
+string G_LAST = ""
+
+fn log_line(string s) void {
+    string nl = std.string.string_create("\n")
+    std.io.file_write(G_LOG, s.ptr, std.string.string_length(s))
+    std.io.file_write(G_LOG, nl.ptr, 1)
+    std.io.file_flush(G_LOG)
+}
+
+fn log_cstr(string tag, cstring v) void {
+    string nl = std.string.string_create("\n")
+    std.io.file_write(G_LOG, tag.ptr, std.string.string_length(tag))
+    std.io.file_write(G_LOG, v, strlen(v))
+    std.io.file_write(G_LOG, nl.ptr, 1)
+    std.io.file_flush(G_LOG)
+}
+
+# ---------- 回调 A: 带 #[no_kmm]（禁用 KMM 插桩，纯 C ABI 上下文） ----------
+#[no_kmm]
+fn ping_handler(seq: cstring, req: cstring, arg: void()) void {
+    println("[wv_smoke] kaula_ping fired(no_kmm), seq=", seq, " req=", req)
+    log_cstr(std.string.string_create("[wv_smoke][no_kmm] ping seq="), seq)
+    log_cstr(std.string.string_create("[wv_smoke][no_kmm] ping req="), req)
+    # 回传成功结果给 JS 侧（result 必须是合法 JSON 值）
+    webview.webview_return(G_WV, seq, 0, "\"pong-from-kaula\"")
+    # 反向通路: 从 native 主动 eval JS 更新页面，证明双向通信
+    webview.webview_eval(G_WV, "document.getElementById('status').innerText='bidirectional OK: native -> js eval'")
+    log_line(std.string.string_create("[wv_smoke][no_kmm] webview_return + webview_eval done"))
+}
+
+# ---------- 回调 B: 默认 KMM（不加 #[no_kmm]），把 payload 拷贝到全局 ----------
+fn store_handler(seq: cstring, req: cstring, arg: void()) void {
+    println("[wv_smoke] kaula_store fired(default kmm), req=", req)
+    log_cstr(std.string.string_create("[wv_smoke][default] store req="), req)
+    # cstring -> 拥有所有权的 String（string_create 复制内容）
+    G_LAST = std.string.string_create(req)
+    webview.webview_return(G_WV, seq, 0, "\"stored\"")
+    log_line(std.string.string_create("[wv_smoke][default] stored into G_LAST, handler returns"))
+}
+
+# ---------- 回调 C: 默认 KMM，验证上一个回调存入全局的字符串是否仍存活 ----------
+fn check_handler(seq: cstring, req: cstring, arg: void()) void {
+    println("[wv_smoke] kaula_check fired(default kmm)")
+    log_line(std.string.string_concat(std.string.string_create("[wv_smoke][default] cross-callback G_LAST="), G_LAST))
+    string alive = std.string.string_concat(std.string.string_create("alive:"), G_LAST)
+    log_line(std.string.string_concat(std.string.string_create("[wv_smoke][default] concat in 2nd callback="), alive))
+    webview.webview_return(G_WV, seq, 0, "\"checked\"")
+}
+
+# ---------- 回调 D: JS 自诊断上报（init 脚本执行状态） ----------
+#[no_kmm]
+fn diag_handler(seq: cstring, req: cstring, arg: void()) void {
+    println("[wv_smoke] kaula_diag fired, req=", req)
+    log_cstr(std.string.string_create("[wv_smoke][diag] req="), req)
+    webview.webview_return(G_WV, seq, 0, "\"ok\"")
+}
+
+fn main() {
+    G_LOG = std.io.file_open("wv_smoke.log", "w")
+    println("[wv_smoke] creating webview...")
+    log_line(std.string.string_create("[wv_smoke] creating webview..."))
+    void() w = webview.webview_create(0, null)
+    if w == null {
+        println("[wv_smoke] ERROR: webview_create returned null")
+        log_line(std.string.string_create("[wv_smoke] ERROR: webview_create returned null"))
+        std.io.file_close(G_LOG)
+        return
+    }
+    G_WV = w
+    println("[wv_smoke] webview created, handle=", w)
+    log_line(std.string.string_create("[wv_smoke] webview created OK"))
+
+    webview.webview_set_title(w, "Kaula WebUI Probe")
+    webview.webview_set_size(w, 600, 400, 0)
+
+    # 绑定 JS 全局函数 -> 顶层具名回调（先于 set_html，保证页面创建时胶水已就位）
+    webview.webview_bind(w, "kaula_ping", ping_handler, null)
+    webview.webview_bind(w, "kaula_store", store_handler, null)
+    webview.webview_bind(w, "kaula_check", check_handler, null)
+    webview.webview_bind(w, "kaula_diag", diag_handler, null)
+
+    # 注入自动测试: 无需人工点击（每段独立 webview_init，先于 set_html 注册）
+    #   页面加载即 kaula_diag 自诊断 + 改 document.title 供窗口标题观察
+    #   t=1.5s kaula_ping  (#[no_kmm] 回调 + return/eval 双向通路)
+    #   t=2.5s kaula_store (默认KMM 回调, payload 拷贝入全局)
+    #   t=3.5s kaula_check (默认KMM 回调, 验证跨回调字符串存活)
+    webview.webview_init(w, "document.title='INIT-RAN'; try { window.kaula_diag('init-script-ran glue=' + (typeof window.kaula_ping)); } catch(e) {}")
+    webview.webview_init(w, "setTimeout(function(){ try { window.kaula_ping('auto-test').then(function(r){ document.getElementById('status').innerText='promise resolved: '+r; }).catch(function(e){ try { window.kaula_diag('ping-rejected: '+e); } catch(e2) {} }); } catch(e){ try { window.kaula_diag('ping-threw: '+e); } catch(e2) {} } }, 1500);")
+    webview.webview_init(w, "setTimeout(function(){ try { window.kaula_store('store-payload-A'); } catch(e){ try { window.kaula_diag('store-threw: '+e); } catch(e2) {} } }, 2500);")
+    webview.webview_init(w, "setTimeout(function(){ try { window.kaula_check('verify'); } catch(e){ try { window.kaula_diag('check-threw: '+e); } catch(e2) {} } }, 3500);")
+
+    # 页面: 标题 + 状态行 + 按钮（onclick 调绑定的 JS 函数）
+    webview.webview_set_html(w, "<!doctype html><html><head><meta charset='utf-8'><style>body{font-family:system-ui,sans-serif;background:#11151c;color:#e6e6e6;padding:28px}button{padding:8px 18px;font-size:15px;cursor:pointer}#status{color:#7fd47f;margin-top:14px}</style></head><body><h1>Kaula WebUI Probe</h1><p id='status'>waiting for callback...</p><button onclick=\"kaula_ping('btn-click')\">Ping Kaula</button></body></html>")
+
+    println("[wv_smoke] entering webview_run (blocking)...")
+    log_line(std.string.string_create("[wv_smoke] entering webview_run"))
+    webview.webview_run(w)
+    webview.webview_destroy(w)
+    println("[wv_smoke] exited")
+    log_line(std.string.string_create("[wv_smoke] exited"))
+    std.io.file_close(G_LOG)
+}
+
+# std 未导出 strlen，FFI 直接声明（供 file_write 计算 cstring 字节长度）
+# 注意: 必须放在文件末尾 —— extern fn 的返回类型解析会贪婪吞掉紧随其后的 void(...) 类型行
+extern fn strlen(s: cstring) -> size

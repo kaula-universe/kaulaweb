@@ -1,0 +1,27 @@
+# ============================================================
+# counter_web.kl — 计数器 WASM 薄入口（与 counter_native.kl 复用同一份逻辑）
+# ------------------------------------------------------------
+# 用户视角零 HTML/JS/CSS：wasm_backend_start() 注册浏览器平台函数后，
+# kw_start() 下发首帧即返回，后续交互全部由浏览器事件驱动。
+#
+# 构建：WASM 产物由 #10 构建脚本经 emcc 完成（见 backends/wasm_shim.c）；
+# kaulac native 编译本入口仅验证 .kl 过编译器。
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "../webui/element.kl"
+import "../webui/app.kl"
+import "../webui/bridge.kl"
+import "../webui/shell.kl"
+import "../backends/backend_wasm.kl"
+import "counter.kl"
+
+fn main() {
+    counter_init()
+    # WASM 后端：注册 show/eval 平台函数（无窗口参数）
+    wasm_backend_start()
+    app_set_render(as<cstring>(counter_view))
+    kw_start()
+    # main 立即返回；事件由浏览器经 kaula_event -> shim 驱动
+}

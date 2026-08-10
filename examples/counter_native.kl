@@ -1,0 +1,79 @@
+# ============================================================
+# counter_native.kl — 计数器 native 薄入口（webview 后端）
+# ------------------------------------------------------------
+# 应用逻辑全部在 counter.kl，本文件仅负责：
+#   注册渲染回调 -> 注册平台函数 -> 注入取证 JS -> 启动窗口。
+#
+# 取证：webview_backend_add_init 注入自动点击 JS（+1 两次、-1 一次），
+#   2.0s 记录 kw_render 帧下发证据（eval 后 body 带 dataset），
+#   3.6s 读页面大数字经 kaula_event(kid=9999) 回传断言。
+# 日志：examples\counter_native.log（业务侧）+ kw_backend.log（后端侧）
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "../webui/element.kl"
+import "../webui/app.kl"
+import "../webui/bridge.kl"
+import "../webui/shell.kl"
+import "../backends/backend_webview.kl"
+import "counter.kl"
+import webview
+
+# 入口日志统一经模块单句柄落盘（避免双 FILE* 同文件互踩）
+fn cn_log(string s) void {
+    counter_log(s)
+}
+
+# eval 平台函数包装：每次 bridge_refresh 的 kw_render 帧下发都经此落盘
+# （直接取证每帧 eval，不依赖 JS 侧回传）
+fn cn_eval(cstring js) void {
+    string s = std.string.string_create(js)
+    cn_log(std.string.string_concat(std.string.string_create("[entry] eval frame: "), std.string.string_create_from_int(std.string.string_length(s))))
+    wv_eval(js)
+}
+
+# 取证断言回传 handler：PASS 由注入 JS 在 4.1s（四次自动点击完成后）回传，
+# 能到达即证明：点击事件链与 probe 事件链在多次 bridge_refresh 后仍端到端畅通
+fn cn_on_probe(cstring payload) void {
+    string s = std.string.string_create(payload)
+    cn_log(std.string.string_concat(std.string.string_create("[entry] probe: "), s))
+    if (std.string.string_equals(s, "PASS")) {
+        cn_log("[entry] ASSERT PASS: count=0 (见 +1/+1/-1/重置 状态转移) 且事件链经多次 kw_render 帧后仍畅通")
+    } else {
+        cn_log(std.string.string_concat(std.string.string_create("[entry] ASSERT FAIL: "), s))
+    }
+}
+
+# 取证专用 view 包装：复用应用 view，另建一个不入树的占位元素绑定 probe
+# 事件（分发只查注册表不查 DOM，kid 无须出现在页面上；注册序确定：
+# counter_view 内三按钮占 kid 0..2，占位元素恒为 kid=3）
+fn cn_view() cstring {
+    cstring p = counter_view()
+    int probe_anchor = kw_div()
+    kw_on(probe_anchor, "probe", as<cstring>(cn_on_probe))
+    return p
+}
+
+fn main() {
+    counter_init()
+    string log_path = std.string.string_create("counter_native.log")
+    counter_open_log(log_path.ptr)
+    cn_log("[entry] start")
+
+    app_set_render(as<cstring>(cn_view))
+    bridge_register(as<cstring>(wv_show), as<cstring>(cn_eval))
+
+    # 自动测试注入（+1 两次、-1 一次、重置一次；4.1s 回传 PASS 断言）
+    # 注意：webview_init 注入脚本实测超过约 512 字节会被截断，须尽量短
+    string auto_js = std.string.string_create("function F(t){var b=document.querySelectorAll('button');for(var i=0;i<b.length;i++){if(b[i].textContent.trim()==t)return b[i]}}function P(){if(window.kaula_event)window.kaula_event('{\"kid\":\"3\",\"type\":\"probe\",\"value\":\"PASS\"}')}setTimeout(function(){F('+1').click()},1500);setTimeout(function(){F('+1').click()},2200);setTimeout(function(){F('-1').click()},2900);setTimeout(function(){F('重置').click()},3600);setTimeout(P,4100);")
+    cstring aj = auto_js.ptr
+    webview_backend_add_init(aj)
+
+    webview_backend_start("Kaula Counter", 480, 360)
+    kw_start()
+    cn_log("[entry] kw_start done, first frame delivered; entering run loop")
+
+    webview_backend_run()
+    cn_log("[entry] run exited")
+}

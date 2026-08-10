@@ -1,0 +1,158 @@
+# ============================================================
+# app.kl — Kaula WebUI 框架核心：应用生命周期与事件注册表
+# ------------------------------------------------------------
+# 平台无关。全局事件注册表：kid -> (event_type, handler)。
+# Kaula 无闭包，应用状态由用户以全局变量自管；
+# 渲染回调（函数指针）经 app_set_render 注册。
+#
+# handler 约定：void(cstring)，参数为事件 payload（value 字段原文）；
+# 需要长期持有时请在 handler 内用 std.string.string_create 拷贝。
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "element.kl"
+
+# 事件处理器类型：void(cstring)（别名中字符串只能用 cstring，见 element.kl 注释）
+type EventType = void(cstring) void;
+# 渲染回调类型：无参，返回 HTML 片段（#app 容器内容）的 cstring 指针。
+# 别名中 string 会被映射为 char* 与 String 结构体 ABI 不符，故约定：
+# 用户 view 函数把渲染结果存入全局 string 后返回其 .ptr，框架立即拷贝。
+type RenderFn = void() cstring;
+
+const KW_MAX_KID = 1024
+
+# ---------- 注册表 ----------
+class Binding {
+    kid: int
+    ev: string
+    handler: EventType
+    constructor() {
+        self.kid = -1
+        self.ev = std.string.string_create("")
+    }
+}
+
+void() G_REGISTRY
+int G_KID_SEQ = 0
+RenderFn G_RENDER
+
+# 超限/异常日志落盘
+fn kw_log_error(string msg) void {
+    void() f = std.io.file_open("kw_error.log", "a")
+    if (f == null) {
+        return
+    }
+    std.io.file_write(f, msg.ptr, std.string.string_length(msg))
+    string nl = std.string.string_create("\n")
+    std.io.file_write(f, nl.ptr, 1)
+    std.io.file_flush(f)
+    std.io.file_close(f)
+}
+
+export fn kw_registry_init() void {
+    if (G_REGISTRY == null) {
+        G_REGISTRY = std.container.vector_create(64)
+    }
+}
+
+# 每次全量重渲染前调用：清空注册表并重置 kid 计数器
+# （渲染过程中 kw_on 会重新注册，保证 kid 与当前 DOM 一致）
+# 同步重置元素池内所有 kid：防止跨 refresh 复用旧元素再 on() 时
+# 旧 kid 与本帧新序列（从 0 重数）冲突（见 element.kl kw_elem_pool_reset_kids）
+export fn kw_registry_reset() void {
+    kw_registry_init()
+    std.container.vector_clear(G_REGISTRY)
+    G_KID_SEQ = 0
+    kw_elem_pool_reset_kids()
+}
+
+export fn kw_registry_size() int {
+    if (G_REGISTRY == null) {
+        return 0
+    }
+    return as<int>(std.container.vector_size(G_REGISTRY))
+}
+
+# 注册一条事件绑定（钩子实现，由 element.kl 的 Elem.on 经 kw_set_on_hook 调入）
+# 同一元素首次绑定分配新 kid（写回元素，渲染时输出 data-kid），后续绑定复用
+fn kw_on_impl(int elem_handle, cstring event_type_c, cstring handler) int {
+    kw_registry_init()
+    size_t n = std.container.vector_size(G_REGISTRY)
+    if (n >= KW_MAX_KID) {
+        kw_log_error("[kaula-webui] registry overflow: kid limit 1024 reached, binding dropped")
+        return -1
+    }
+    int kid = kw_elem_get_kid(elem_handle)
+    if (kid < 0) {
+        kid = G_KID_SEQ
+        G_KID_SEQ = G_KID_SEQ + 1
+        kw_elem_set_kid(elem_handle, kid)
+    }
+    Binding b = Binding()
+    b.kid = kid
+    b.ev = std.string.string_create(event_type_c)
+    b.handler = as<EventType>(handler)
+    std.container.vector_push_back(G_REGISTRY, as<void()>(b))
+    return kid
+}
+
+# 框架初始化：初始化注册表 + 向 element.kl 注入事件绑定钩子
+export fn kw_init() void {
+    kw_registry_init()
+    kw_set_on_hook(as<cstring>(kw_on_impl))
+}
+
+# 绑定事件：返回 kid（elem 句柄见 element.kl）；handler = as<cstring>(函数名)
+export fn kw_on(int elem_handle, string event_type, cstring handler) int {
+    cstring ev = event_type.ptr
+    return kw_on_impl(elem_handle, ev, handler)
+}
+
+# ---------- 渲染回调 ----------
+export fn app_set_render(cstring fn_ptr) void {
+    G_RENDER = as<RenderFn>(fn_ptr)
+}
+
+export fn app_render_html() string {
+    if (G_RENDER == null) {
+        return std.string.string_create("")
+    }
+    cstring p = G_RENDER()
+    return std.string.string_create(p)
+}
+
+# 重新 render：先清空注册表（render 过程中重建），再调渲染回调
+export fn app_refresh() string {
+    kw_registry_reset()
+    return app_render_html()
+}
+
+# ---------- 事件分发 ----------
+# bridge.kl 的 kw_event 解析 JSON 后调用本函数
+# p/b/h/vp 提升到循环外声明：块内声明会触发 KMM 作用域回卷，
+# handler 内部分配并写入全局的字符串会悬垂被覆盖（见 element.kl 注释）。
+export fn kw_dispatch_event(int kid, string event_type, string value) void {
+    if (G_REGISTRY == null) {
+        return
+    }
+    size_t n = std.container.vector_size(G_REGISTRY)
+    void() p
+    Binding b
+    EventType h
+    cstring vp
+    size_t i = 0
+    while (i < n) {
+        p = std.container.vector_get(G_REGISTRY, i)
+        b = as<Binding>(p)
+        if (b.kid == kid) {
+            if (std.string.string_equals(b.ev, event_type)) {
+                h = b.handler
+                vp = value.ptr
+                h(vp)
+                return
+            }
+        }
+        i = i + 1
+    }
+}

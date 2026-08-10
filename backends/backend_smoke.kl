@@ -1,0 +1,95 @@
+# ============================================================
+# backend_smoke.kl — native webview 后端最小闭环验证
+# ------------------------------------------------------------
+# 页面：标题 + 计数文本 + 「+1」按钮；点击后计数+1 并 bridge_refresh。
+# 验证链路：
+#   首帧 kw_start -> wv_show -> webview_set_html
+#   webview_init 注入自动点击 JS（1.2s / 2.4s 各一次）
+#   点击 -> shell 胶水 -> window.kaula_event -> bind 回调
+#        -> 解包/入队 -> kw_event -> on_inc -> bridge_refresh
+#        -> wv_eval(kw_render) 更新页面
+# 取证：backend_smoke.log（业务侧）+ kw_backend.log（后端侧）
+#
+# 编译：在 kaula\kaula-compiler 目录下
+#   .\kaulac.exe "..\..\kaula-webui\backends\backend_smoke.kl"
+# 运行：exe 生成在源文件目录（backends\backend_smoke.exe）
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "../webui/element.kl"
+import "../webui/app.kl"
+import "../webui/bridge.kl"
+import "../webui/shell.kl"
+import "backend_webview.kl"
+import webview
+
+int G_COUNT = 0
+string G_VIEW_BUF = ""
+void() G_SLOG
+
+fn slog(string s) void {
+    if (G_SLOG == null) {
+        return
+    }
+    string nl = std.string.string_create("\n")
+    std.io.file_write(G_SLOG, s.ptr, std.string.string_length(s))
+    std.io.file_write(G_SLOG, nl.ptr, 1)
+    std.io.file_flush(G_SLOG)
+}
+
+# 点击 handler：改状态 + 刷新（经 eval kw_render 局部更新）
+fn on_inc(cstring payload) void {
+    G_COUNT = G_COUNT + 1
+    slog(std.string.string_concat(std.string.string_create("[smoke] click event -> count="), std.string.string_create_from_int(G_COUNT)))
+    bridge_refresh()
+}
+
+# 渲染回调：结果存全局 string 后返回 .ptr（框架立即拷贝）
+fn view() cstring {
+    int root = kw_div()
+    int st = kw_style()
+    kw_sty_bg(st, "#1a1f28")
+    kw_sty_pad(st, "18px")
+    kw_sty_rad(st, "10px")
+    kw_set_style(root, st)
+
+    int h1 = kw_elem("h1")
+    kw_set_text(h1, "Kaula WebUI Backend Smoke")
+    kw_add(root, h1)
+
+    string cnt = std.string.string_create("count = ")
+    cnt = std.string.string_concat(cnt, std.string.string_create_from_int(G_COUNT))
+    int p = kw_p(cnt)
+    kw_add(root, p)
+
+    int btn = kw_button("+1")
+    kw_on(btn, "click", as<cstring>(on_inc))
+    kw_add(root, btn)
+
+    G_VIEW_BUF = kw_render_elem(root)
+    return G_VIEW_BUF.ptr
+}
+
+fn main() {
+    G_SLOG = std.io.file_open("backend_smoke.log", "w")
+    slog("[smoke] start")
+
+    app_set_render(as<cstring>(view))
+    bridge_register(as<cstring>(wv_show), as<cstring>(wv_eval))
+
+    # 自动点击注入（无需人工操作）：1.2s 与 2.4s 各点一次按钮，
+    # 预期最终 count = 2（cstring 参数不能直接传字面量，经 .ptr 中转）
+    string auto_js = "setTimeout(function(){var b=document.querySelector('button');if(b){b.click()}},1200);setTimeout(function(){var b2=document.querySelector('button');if(b2){b2.click()}},2400);"
+    cstring aj = auto_js.ptr
+    webview_backend_add_init(aj)
+
+    webview_backend_start("Kaula WebUI Backend Smoke", 720, 480)
+    # kw_start：框架初始化 + 首帧渲染（经 wv_show -> webview_set_html）
+    kw_start()
+    slog("[smoke] kw_start done, first frame delivered; entering run loop")
+
+    webview_backend_run()
+    slog("[smoke] run exited")
+    std.io.file_close(G_SLOG)
+}

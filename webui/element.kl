@@ -1,0 +1,482 @@
+# ============================================================
+# element.kl — Kaula WebUI 框架核心：元素树与样式
+# ------------------------------------------------------------
+# 平台无关（不依赖 webview / std.web / std.net），
+# 供 webview 后端与 WASM 后端复用。
+#
+# 对外为「句柄式」API（int 句柄 + 顶层函数）：
+#   Kaula 编译器当前不支持跨文件 class / 类型别名传播，
+#   因此 Style / Elem 类仅在本文件内部使用，
+#   其他文件（含用户程序）通过 kw_* 函数以 int 句柄操作。
+# ============================================================
+import std.string
+import std.container
+
+# ---------- 事件绑定钩子 ----------
+# Elem.on() 需要访问 app.kl 的注册表，但 element.kl 不能反向 import app.kl
+# （避免循环依赖），故由 app.kl 在 kw_init() 时注入实现。
+# 别名中字符串参数必须是 cstring（编译器把别名里的 string 映射为 char*，
+# 与 Kaula 的 String 结构体 ABI 不匹配；调用时传 .ptr）。
+# 函数指针统一以 cstring 承载传递（as<cstring>(函数名)），因 void() 不能
+# 作参数/返回类型，别名类型也不能出现在函数签名（C 前置声明早于 typedef）。
+type KwOnHook = void(int, cstring, cstring) int;
+
+KwOnHook G_ON_HOOK
+
+# 由 app.kl 注入事件绑定实现：(elem 句柄, 事件类型, handler 函数指针) -> kid
+export fn kw_set_on_hook(cstring h) void {
+    G_ON_HOOK = as<KwOnHook>(h)
+}
+
+# 钩子调用包装（顶层函数）：类方法体在 C 中先于全局变量声明输出，
+# 故类方法不能直接引用 G_ON_HOOK，必须经此函数中转。
+fn kw_hook_call(int handle, cstring ev, cstring handler) int {
+    if (G_ON_HOOK == null) {
+        return -1
+    }
+    return G_ON_HOOK(handle, ev, handler)
+}
+
+# ---------- HTML 转义 ----------
+export fn kw_escape_html(string s) string {
+    string out = std.string.string_create("")
+    size_t n = std.string.string_length(s)
+    size_t i = 0
+    while (i < n) {
+        char c = std.string.string_char_at(s, i)
+        if (c == '<') {
+            out = out + "&lt;"
+        } else if (c == '>') {
+            out = out + "&gt;"
+        } else if (c == '&') {
+            out = out + "&amp;"
+        } else if (c == '"') {
+            out = out + "&quot;"
+        } else if (c == '\'') {
+            out = out + "&#39;"
+        } else {
+            out = std.string.string_concat_char(out, c)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+# 自闭合（void）标签：不输出文本/子节点/闭合标签
+fn kw_is_void_tag(string t) bool {
+    if (std.string.string_equals(t, "input")) {
+        return true
+    }
+    if (std.string.string_equals(t, "br")) {
+        return true
+    }
+    if (std.string.string_equals(t, "img")) {
+        return true
+    }
+    if (std.string.string_equals(t, "hr")) {
+        return true
+    }
+    if (std.string.string_equals(t, "meta")) {
+        return true
+    }
+    if (std.string.string_equals(t, "link")) {
+        return true
+    }
+    if (std.string.string_equals(t, "source")) {
+        return true
+    }
+    return false
+}
+
+# ============================================================
+# Style —— 键值 CSS 构建器（内部类，经句柄 API 使用）
+# ============================================================
+class Style {
+    css: string
+    constructor() {
+        self.css = std.string.string_create("")
+    }
+    fn append(string k, string v) void {
+        string a = self.css + k
+        string b = a + ":"
+        string c = b + v
+        self.css = c + ";"
+    }
+    fn render() string {
+        return self.css
+    }
+    fn bg(string c) void { self.append("background", c) }
+    fn color(string c) void { self.append("color", c) }
+    fn pad(string v) void { self.append("padding", v) }
+    fn margin(string v) void { self.append("margin", v) }
+    fn rad(string v) void { self.append("border-radius", v) }
+    fn border(string v) void { self.append("border", v) }
+    fn font_sz(string v) void { self.append("font-size", v) }
+    fn font_w(string v) void { self.append("font-weight", v) }
+    fn display(string v) void { self.append("display", v) }
+    fn flex_dir(string v) void { self.append("flex-direction", v) }
+    fn align(string v) void { self.append("align-items", v) }
+    fn justify(string v) void { self.append("justify-content", v) }
+    fn gap(string v) void { self.append("gap", v) }
+    fn text_align(string v) void { self.append("text-align", v) }
+}
+
+# ---------- Style 句柄池 ----------
+void() G_STYLE_POOL
+# 越界/失效句柄的哨兵对象（vector_get 返回 NULL 时返回它，避免解引用崩溃）
+void() G_STYLE_SENTINEL
+
+# void() 不能作返回类型，故池初始化写成副作用函数
+fn style_pool_ensure() void {
+    if (G_STYLE_POOL == null) {
+        G_STYLE_POOL = std.container.vector_create(16)
+    }
+}
+
+fn style_at(int h) Style {
+    style_pool_ensure()
+    void() p = std.container.vector_get(G_STYLE_POOL, as<size_t>(h))
+    if (p == null) {
+        # 越界句柄：返回惰性哨兵，调用方写入只落在哨兵上，不崩
+        # （此块无声明，不会触发 KMM 作用域回卷；哨兵仅构造一次，
+        #   避免每次访问都做无效分配消耗全局池）
+        if (G_STYLE_SENTINEL == null) {
+            G_STYLE_SENTINEL = as<void()>(Style())
+        }
+        return as<Style>(G_STYLE_SENTINEL)
+    }
+    return as<Style>(p)
+}
+
+export fn kw_style() int {
+    Style s = Style()
+    style_pool_ensure()
+    size_t idx = std.container.vector_size(G_STYLE_POOL)
+    std.container.vector_push_back(G_STYLE_POOL, as<void()>(s))
+    return as<int>(idx)
+}
+
+export fn kw_sty_append(int h, string k, string v) void {
+    Style s = style_at(h)
+    s.append(k, v)
+}
+
+export fn kw_sty_bg(int h, string c) void {
+    Style s = style_at(h)
+    s.bg(c)
+}
+export fn kw_sty_color(int h, string c) void {
+    Style s = style_at(h)
+    s.color(c)
+}
+export fn kw_sty_pad(int h, string v) void {
+    Style s = style_at(h)
+    s.pad(v)
+}
+export fn kw_sty_margin(int h, string v) void {
+    Style s = style_at(h)
+    s.margin(v)
+}
+export fn kw_sty_rad(int h, string v) void {
+    Style s = style_at(h)
+    s.rad(v)
+}
+export fn kw_sty_border(int h, string v) void {
+    Style s = style_at(h)
+    s.border(v)
+}
+export fn kw_sty_font_sz(int h, string v) void {
+    Style s = style_at(h)
+    s.font_sz(v)
+}
+export fn kw_sty_font_w(int h, string v) void {
+    Style s = style_at(h)
+    s.font_w(v)
+}
+export fn kw_sty_display(int h, string v) void {
+    Style s = style_at(h)
+    s.display(v)
+}
+export fn kw_sty_flex_dir(int h, string v) void {
+    Style s = style_at(h)
+    s.flex_dir(v)
+}
+export fn kw_sty_align(int h, string v) void {
+    Style s = style_at(h)
+    s.align(v)
+}
+export fn kw_sty_justify(int h, string v) void {
+    Style s = style_at(h)
+    s.justify(v)
+}
+export fn kw_sty_gap(int h, string v) void {
+    Style s = style_at(h)
+    s.gap(v)
+}
+export fn kw_sty_text_align(int h, string v) void {
+    Style s = style_at(h)
+    s.text_align(v)
+}
+
+export fn kw_style_css(int h) string {
+    Style s = style_at(h)
+    return s.render()
+}
+
+# ============================================================
+# Elem —— 树形元素（内部类，经句柄 API 使用）
+# ============================================================
+class Elem {
+    tag: string
+    text: string
+    attrs: string
+    style_str: string
+    kid: int
+    handle: int
+    constructor() {
+        self.tag = std.string.string_create("")
+        self.text = std.string.string_create("")
+        self.attrs = std.string.string_create("")
+        self.style_str = std.string.string_create("")
+        self.kid = -1
+        self.handle = -1
+    }
+    fn set_tag(string t) void { self.tag = t }
+    fn set_text(string t) void { self.text = t }
+    # raw 形如 class="btn" 或 placeholder="hi"，原样拼入开标签
+    fn set_attr(string raw) void {
+        self.attrs = self.attrs + " " + raw
+    }
+    fn set_style_str(string s) void { self.style_str = s }
+    fn set_style(Style s) void { self.style_str = s.render() }
+    # 绑定事件：kid 由 app.kl 注入的钩子分配；渲染时输出 data-kid="N"
+    # handler 为函数指针（以 cstring 承载，as<cstring>(函数名)）
+    fn on(string event_type, cstring handler) int {
+        cstring ev = event_type.ptr
+        return kw_hook_call(self.handle, ev, handler)
+    }
+    # 递归渲染为 HTML 字符串
+    # 注意：块内（if/while 体）不得声明局部变量——编译器会给含声明的块
+    # 生成 KMM 作用域回卷（scope_pop/offset_restore），把块内新分配的
+    # 字符串缓冲卷入可复用区，块外持有的结果会悬垂被覆盖。
+    # 故 ks/esc/kids 等一律提升到函数顶层声明。
+    fn render() string {
+        string out = std.string.string_create("")
+        string ks = std.string.string_create("")
+        string esc = std.string.string_create("")
+        string kids = std.string.string_create("")
+        if (std.string.string_is_empty(self.tag)) {
+            return kw_escape_html(self.text)
+        }
+        out = out + "<"
+        out = out + self.tag
+        if (std.string.string_is_empty(self.style_str)) {
+        } else {
+            out = out + " style=\""
+            out = out + self.style_str
+            out = out + "\""
+        }
+        if (self.kid < 0) {
+        } else {
+            ks = std.string.string_create_from_int(self.kid)
+            out = out + " data-kid=\""
+            out = out + ks
+            out = out + "\""
+        }
+        if (std.string.string_is_empty(self.attrs)) {
+        } else {
+            out = out + self.attrs
+        }
+        out = out + ">"
+        if (kw_is_void_tag(self.tag)) {
+            return out
+        }
+        esc = kw_escape_html(self.text)
+        out = out + esc
+        kids = kw_render_children(self.handle)
+        out = out + kids
+        out = out + "</"
+        out = out + self.tag
+        out = out + ">"
+        return out
+    }
+}
+
+# ---------- Elem 句柄池 ----------
+void() G_ELEM_POOL
+# 每个元素的子节点向量，索引与 G_ELEM_POOL 一致
+# （类字段不能存 void() 指针，故用平行全局向量）
+void() G_ELEM_CHILD
+# 越界/失效句柄的哨兵元素（同 G_STYLE_SENTINEL）
+void() G_ELEM_SENTINEL
+
+fn elem_pool_ensure() void {
+    if (G_ELEM_POOL == null) {
+        G_ELEM_POOL = std.container.vector_create(32)
+        G_ELEM_CHILD = std.container.vector_create(32)
+    }
+}
+
+fn elem_at(int h) Elem {
+    elem_pool_ensure()
+    void() p = std.container.vector_get(G_ELEM_POOL, as<size_t>(h))
+    if (p == null) {
+        # 越界句柄：返回惰性哨兵，调用方读写只落在哨兵上，不崩
+        # （此块无声明，不会触发 KMM 作用域回卷；哨兵仅构造一次，
+        #   避免每次 elem_at 都做无效分配消耗全局池）
+        if (G_ELEM_SENTINEL == null) {
+            G_ELEM_SENTINEL = as<void()>(Elem())
+        }
+        return as<Elem>(G_ELEM_SENTINEL)
+    }
+    return as<Elem>(p)
+}
+
+# 重置全部池内元素的 kid 为 -1：由 app.kl 的 kw_registry_reset 同步调用，
+# 防止跨 refresh 复用旧元素再 on() 时旧 kid 与本帧新序列冲突
+# （kid 计数器每帧从 0 重数，旧元素残留的 kid 会撞号）。
+export fn kw_elem_pool_reset_kids() void {
+    if (G_ELEM_POOL == null) {
+        return
+    }
+    size_t n = std.container.vector_size(G_ELEM_POOL)
+    void() p
+    Elem e
+    size_t i = 0
+    while (i < n) {
+        p = std.container.vector_get(G_ELEM_POOL, i)
+        if (p != null) {
+            e = as<Elem>(p)
+            e.kid = -1
+        }
+        i = i + 1
+    }
+}
+
+# 渲染指定元素的全部子节点（供 Elem.render 回调，避免类方法引用全局）
+# p/cr 提升到循环外声明：while 体内声明局部变量会触发 KMM 作用域回卷，
+# 累加结果 out 的缓冲将被后续迭代/分配的内存覆盖（字符串损坏根因）。
+fn kw_render_children(int h) string {
+    string out = std.string.string_create("")
+    void() cv = std.container.vector_get(G_ELEM_CHILD, as<size_t>(h))
+    # 越界句柄：vector_get 返回 NULL，直接返回空（vector_size(NULL) 会崩）
+    if (cv == null) {
+        return out
+    }
+    size_t n = std.container.vector_size(cv)
+    void() p
+    Elem c
+    string cr = std.string.string_create("")
+    size_t i = 0
+    while (i < n) {
+        p = std.container.vector_get(cv, i)
+        if (p != null) {
+            c = as<Elem>(p)
+            cr = c.render()
+            out = out + cr
+        }
+        i = i + 1
+    }
+    return out
+}
+
+# 创建元素，返回句柄
+export fn kw_elem(string tag) int {
+    Elem e = Elem()
+    e.set_tag(tag)
+    elem_pool_ensure()
+    size_t idx = std.container.vector_size(G_ELEM_POOL)
+    e.handle = as<int>(idx)
+    std.container.vector_push_back(G_ELEM_POOL, as<void()>(e))
+    std.container.vector_push_back(G_ELEM_CHILD, std.container.vector_create(4))
+    return e.handle
+}
+
+# 便捷构造
+export fn kw_div() int {
+    return kw_elem("div")
+}
+
+export fn kw_span() int {
+    return kw_elem("span")
+}
+
+export fn kw_button(string text) int {
+    int h = kw_elem("button")
+    kw_set_text(h, text)
+    return h
+}
+
+export fn kw_p(string text) int {
+    int h = kw_elem("p")
+    kw_set_text(h, text)
+    return h
+}
+
+export fn kw_input(string typ) int {
+    int h = kw_elem("input")
+    string a = std.string.string_create("type=\"")
+    a = a + typ
+    a = a + "\""
+    kw_set_attr(h, a)
+    return h
+}
+
+export fn kw_form() int {
+    return kw_elem("form")
+}
+
+# ---------- 属性设置 ----------
+export fn kw_set_text(int h, string t) void {
+    Elem e = elem_at(h)
+    e.set_text(t)
+}
+
+export fn kw_set_attr(int h, string raw) void {
+    Elem e = elem_at(h)
+    e.set_attr(raw)
+}
+
+export fn kw_set_style_str(int h, string css) void {
+    Elem e = elem_at(h)
+    e.set_style_str(css)
+}
+
+export fn kw_set_style(int h, int style_handle) void {
+    Elem e = elem_at(h)
+    Style s = style_at(style_handle)
+    e.set_style(s)
+}
+
+# ---------- 树结构 ----------
+export fn kw_add(int parent, int child) void {
+    elem_pool_ensure()
+    void() cv = std.container.vector_get(G_ELEM_CHILD, as<size_t>(parent))
+    # 越界 parent 句柄：cv 为 NULL，vector_push_back(NULL) 会崩，直接忽略
+    if (cv == null) {
+        return
+    }
+    Elem c = elem_at(child)
+    std.container.vector_push_back(cv, as<void()>(c))
+}
+
+# ---------- 事件绑定 ----------
+# 统一入口在 app.kl 的 kw_on（负责 kid 分配与注册表）；
+# Elem.on 仅供框架内部经钩子路径使用。
+
+# ---------- kid 访问（app.kl 渲染管线使用） ----------
+export fn kw_elem_set_kid(int h, int kid) void {
+    Elem e = elem_at(h)
+    e.kid = kid
+}
+
+export fn kw_elem_get_kid(int h) int {
+    Elem e = elem_at(h)
+    return e.kid
+}
+
+# ---------- 渲染 ----------
+export fn kw_render_elem(int h) string {
+    Elem e = elem_at(h)
+    return e.render()
+}

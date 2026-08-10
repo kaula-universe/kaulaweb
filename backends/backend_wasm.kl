@@ -1,0 +1,130 @@
+# ============================================================
+# backend_wasm.kl — Kaula WebUI 的 WASM/Emscripten 后端（含演示 main）
+# ------------------------------------------------------------
+# 与 webview 后端对称：向 bridge.kl 注册两个平台函数
+#   show -> kw_shim_show_html （首帧整页 HTML，C 垫片经 EM_JS 写入 DOM）
+#   eval -> kw_shim_eval     （后续帧 kw_render(...)，C 垫片经 EM_JS 执行）
+#
+# WASM 端特殊性：
+#   整个 Kaula 程序编译成 WASM 跑在浏览器里，shell.kl 的 JS 胶水也在
+#   同一页面。事件由浏览器 DOM 事件经 window.kaula_event -> wasm 导出
+#   _kw_shim_event -> kw_shim_event(C) -> kw_event(Kaula) 直入，
+#   无网络/进程桥。main 初始化完成后立即返回，事件全部由浏览器驱动
+#   （严禁阻塞循环）。
+#
+# kaulac 侧验证（在 kaula\kaula-compiler 目录下）：
+#   .\kaulac.exe --no-cache "..\..\kaula-webui\backends\backend_wasm.kl"
+#   （native 编译仅验证 .kl 可过编译器；kw_shim_* 符号由 backends\wasm_shim.c
+#     提供——native 链接时该文件提供 printf 回退桩，WASM 链接时提供 EM_JS 实现）
+# 实际 WASM 构建由 #10 构建脚本经 emcc 完成（见 wasm_shim.c 头部注释）。
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "../webui/element.kl"
+import "../webui/app.kl"
+import "../webui/bridge.kl"
+import "../webui/shell.kl"
+
+# ---------- 平台函数（经 C 垫片 -> EM_JS -> DOM） ----------
+# 垫片函数在 wasm_shim.c 定义（extern 声明必须放文件末尾，
+# 原因同 probe\wv_smoke.kl：extern fn 返回类型解析会贪婪吞掉后续类型行）
+
+fn wasm_show(cstring html) void {
+    kw_shim_show_html(html)
+}
+
+fn wasm_eval(cstring js) void {
+    kw_shim_eval(js)
+}
+
+# ---------- 后端注册（与 webview 后端对称的入口） ----------
+# 1) 安装 window.kaula_event -> _kw_shim_event 事件桥
+#    （幂等；须在首帧 document.write 之前调用——见 wasm_shim.c）
+# 2) 把 show/eval 平台函数注册进 bridge
+#    （kw_init 由 kw_start 内部完成，此处不重复调用）
+export fn wasm_backend_start() void {
+    kw_shim_install_event_bridge()
+    bridge_register(as<cstring>(wasm_show), as<cstring>(wasm_eval))
+}
+
+# ---------- 演示应用：计数器 + 输入回显 ----------
+int G_CLICKS = 0
+string G_NAME = ""
+
+fn on_click(cstring payload) void {
+    G_CLICKS = G_CLICKS + 1
+    bridge_refresh()
+}
+
+fn on_type(cstring payload) void {
+    G_NAME = std.string.string_create(payload)
+    bridge_refresh()
+}
+
+# 渲染回调约定：结果存入全局 string 后返回 .ptr（框架立即拷贝）
+# 注意：if/while 块体内禁止声明局部变量——编译器会给含声明的块生成
+# KMM_V4_SCOPE 回卷，块内分配的 Elem/字符串缓冲在块结束后落入可复用区，
+# 被随后的渲染分配覆盖（wasm 端实测 memory access out of bounds 根因）。
+# va/echo_txt/echo 一律提升到函数顶层声明（同 element.kl 的 Elem.render）。
+string G_VIEW_BUF = ""
+fn view() cstring {
+    string va = std.string.string_create("")
+    string echo_txt = std.string.string_create("")
+    int echo = 0
+    int root = kw_div()
+    int st = kw_style()
+    kw_sty_bg(st, "#161a22")
+    kw_sty_pad(st, "20px")
+    kw_set_style(root, st)
+
+    int h1 = kw_elem("h1")
+    kw_set_text(h1, "Kaula WebUI on WASM")
+    kw_add(root, h1)
+
+    string cnt_txt = std.string.string_create("clicks: ")
+    cnt_txt = std.string.string_concat_int(cnt_txt, G_CLICKS)
+    int cnt = kw_p(cnt_txt)
+    kw_add(root, cnt)
+
+    int btn = kw_button("+1")
+    kw_on(btn, "click", as<cstring>(on_click))
+    kw_add(root, btn)
+
+    int inp = kw_input("text")
+    kw_set_attr(inp, "placeholder=\"type here\"")
+    if (std.string.string_is_empty(G_NAME) == false) {
+        va = std.string.string_create("value=\"")
+        va = va + G_NAME
+        va = va + "\""
+        kw_set_attr(inp, va)
+    }
+    kw_on(inp, "input", as<cstring>(on_type))
+    kw_add(root, inp)
+
+    if (std.string.string_is_empty(G_NAME) == false) {
+        echo_txt = std.string.string_create("hello, ")
+        echo_txt = echo_txt + G_NAME
+        echo = kw_p(echo_txt)
+        kw_add(root, echo)
+    }
+
+    G_VIEW_BUF = kw_render_elem(root)
+    return G_VIEW_BUF.ptr
+}
+
+# ---------- 主入口 ----------
+# 流程：wasm_backend_start(注册平台函数) -> app_set_render -> kw_start(首帧)
+# -> 立即返回。后续事件由浏览器经 _kw_shim_event 驱动，handler 内
+# 改状态后调 bridge_refresh() 下发增量帧。
+fn main() {
+    wasm_backend_start()
+    app_set_render(as<cstring>(view))
+    kw_start()
+}
+
+# ---------- extern：wasm_shim.c 提供的 C 桥接函数 ----------
+# 必须放在文件末尾（见文件头部说明）
+extern fn kw_shim_show_html(html: cstring) -> void
+extern fn kw_shim_eval(js: cstring) -> void
+extern fn kw_shim_install_event_bridge() -> void

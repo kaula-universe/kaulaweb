@@ -1,0 +1,111 @@
+# ============================================================
+# counter.kl — 计数器应用逻辑（平台无关，无 main）
+# ------------------------------------------------------------
+# 同一份逻辑被 counter_native.kl 与 counter_web.kl 两个薄入口复用，
+# 用户视角零 HTML/JS/CSS：全部 UI 由 kw_* 句柄 API 构建。
+#
+# 对外 API：
+#   fn counter_init() void     # 初始化状态（可选；view 每帧重建 UI）
+#   fn counter_view() cstring  # 渲染回调：构建根元素 -> 存全局 -> 返回 .ptr
+#
+# Kaula 实测约束：
+#   - 局部声明全部提升到函数顶层，块内只赋值（避免 KMM 作用域回卷）
+#   - 非字面量 string 拼接用 std.string.string_concat
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "../webui/element.kl"
+import "../webui/app.kl"
+import "../webui/bridge.kl"
+
+# ---------- 状态 ----------
+int G_COUNTER = 0
+# 渲染结果全局缓冲（框架立即拷贝，见 app.kl RenderFn 约定）
+string G_COUNTER_VIEW_BUF = ""
+# 取证日志句柄（由入口文件初始化；GUI 进程 stdout 不可靠，落盘取证）
+void() G_COUNTER_LOG
+
+# 取证日志：void() 不能作函数参数，故传路径由模块自行打开（append 模式）
+export fn counter_open_log(cstring path) void {
+    G_COUNTER_LOG = std.io.file_open(path, "a")
+}
+
+# 单句柄落盘；入口经本函数写日志，避免双 FILE* 互踩
+export fn counter_log(string s) void {
+    if (G_COUNTER_LOG == null) {
+        return
+    }
+    string nl = std.string.string_create("\n")
+    std.io.file_write(G_COUNTER_LOG, s.ptr, std.string.string_length(s))
+    std.io.file_write(G_COUNTER_LOG, nl.ptr, 1)
+    std.io.file_flush(G_COUNTER_LOG)
+}
+
+# ---------- 初始化 ----------
+# view 每帧全量重建，无需在此构建 UI；仅归零状态
+export fn counter_init() void {
+    G_COUNTER = 0
+}
+
+# ---------- 事件 handler ----------
+# 签名约定：fn h(cstring payload) void；改状态后 bridge_refresh()
+export fn counter_on_inc(cstring payload) void {
+    G_COUNTER = G_COUNTER + 1
+    counter_log(std.string.string_concat(std.string.string_create("[counter] +1 -> "), std.string.string_create_from_int(G_COUNTER)))
+    bridge_refresh()
+}
+
+export fn counter_on_dec(cstring payload) void {
+    G_COUNTER = G_COUNTER - 1
+    counter_log(std.string.string_concat(std.string.string_create("[counter] -1 -> "), std.string.string_create_from_int(G_COUNTER)))
+    bridge_refresh()
+}
+
+export fn counter_on_reset(cstring payload) void {
+    G_COUNTER = 0
+    counter_log(std.string.string_create("[counter] reset -> 0"))
+    bridge_refresh()
+}
+
+# ---------- 渲染 ----------
+# 居中卡片 + 大字号数字 + 三按钮（kid 在 kw_on 时分配，每次 refresh 重注册）
+export fn counter_view() cstring {
+    int root = kw_div()
+    kw_set_style_str(root, "min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 120% at 20% 0%, #1b2436 0%, #0e1219 55%, #090b10 100%);")
+
+    int card = kw_div()
+    kw_set_style_str(card, "min-width:300px;padding:42px 56px;background:linear-gradient(160deg,#1c2333,#141a26);border:1px solid #2c3a52;border-radius:22px;box-shadow:0 24px 70px rgba(0,0,0,0.55);display:flex;flex-direction:column;align-items:center;gap:18px;")
+    kw_add(root, card)
+
+    int tag = kw_p("KAULA · COUNTER")
+    kw_set_style_str(tag, "font-size:11px;letter-spacing:5px;color:#6f81a3;")
+    kw_add(card, tag)
+
+    string num_txt = std.string.string_create_from_int(G_COUNTER)
+    int num = kw_p(num_txt)
+    kw_set_style_str(num, "font-size:88px;font-weight:200;line-height:1;color:#f2f6ff;font-family:'Segoe UI Light','Segoe UI',sans-serif;text-shadow:0 0 42px rgba(96,165,250,0.45);")
+    kw_add(card, num)
+
+    int row = kw_div()
+    kw_set_style_str(row, "display:flex;gap:12px;margin-top:10px;")
+    kw_add(card, row)
+
+    int b_inc = kw_button("+1")
+    kw_set_style_str(b_inc, "padding:11px 28px;border:0;border-radius:12px;font-size:17px;font-weight:600;color:#0b1220;background:linear-gradient(135deg,#8ec5ff,#5b8def);box-shadow:0 6px 18px rgba(91,141,239,0.35);")
+    kw_on(b_inc, "click", as<cstring>(counter_on_inc))
+    kw_add(row, b_inc)
+
+    int b_dec = kw_button("-1")
+    kw_set_style_str(b_dec, "padding:11px 28px;border:1px solid #3d4d68;border-radius:12px;font-size:17px;font-weight:600;color:#c9d6ea;background:#1b2434;")
+    kw_on(b_dec, "click", as<cstring>(counter_on_dec))
+    kw_add(row, b_dec)
+
+    int b_reset = kw_button("重置")
+    kw_set_style_str(b_reset, "padding:11px 24px;border:1px solid #33415a;border-radius:12px;font-size:15px;color:#8b9bb8;background:transparent;")
+    kw_on(b_reset, "click", as<cstring>(counter_on_reset))
+    kw_add(row, b_reset)
+
+    G_COUNTER_VIEW_BUF = kw_render_elem(root)
+    return G_COUNTER_VIEW_BUF.ptr
+}

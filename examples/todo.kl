@@ -1,0 +1,496 @@
+# ============================================================
+# todo.kl — 待办清单应用逻辑（平台无关，无 main）
+# ------------------------------------------------------------
+# 同一份逻辑被 todo_native.kl 与 todo_web.kl 两个薄入口复用。
+# 展示三种能力：input 事件实时捕获 value、submit（表单回车）、列表动态渲染。
+#
+# 对外 API：
+#   fn todo_init() void    # 清空状态
+#   fn todo_view() cstring # 渲染回调
+#
+# 状态：固定容量 32 项（Kaula 无全局数组，用 if 链槽位存取，
+# 写法与 backend_webview.kl 事件环形队列一致）。
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "../webui/element.kl"
+import "../webui/app.kl"
+import "../webui/bridge.kl"
+
+const TODO_CAP = 32
+
+int G_TODO_COUNT = 0
+# 输入框当前值（input 事件实时捕获）
+string G_TODO_INPUT = ""
+string G_TODO_VIEW_BUF = ""
+void() G_TODO_LOG
+
+# ---------- 条目槽位（if 链代替全局数组） ----------
+string G_TI0 = ""
+string G_TI1 = ""
+string G_TI2 = ""
+string G_TI3 = ""
+string G_TI4 = ""
+string G_TI5 = ""
+string G_TI6 = ""
+string G_TI7 = ""
+string G_TI8 = ""
+string G_TI9 = ""
+string G_TI10 = ""
+string G_TI11 = ""
+string G_TI12 = ""
+string G_TI13 = ""
+string G_TI14 = ""
+string G_TI15 = ""
+string G_TI16 = ""
+string G_TI17 = ""
+string G_TI18 = ""
+string G_TI19 = ""
+string G_TI20 = ""
+string G_TI21 = ""
+string G_TI22 = ""
+string G_TI23 = ""
+string G_TI24 = ""
+string G_TI25 = ""
+string G_TI26 = ""
+string G_TI27 = ""
+string G_TI28 = ""
+string G_TI29 = ""
+string G_TI30 = ""
+string G_TI31 = ""
+
+int G_TD0 = 0
+int G_TD1 = 0
+int G_TD2 = 0
+int G_TD3 = 0
+int G_TD4 = 0
+int G_TD5 = 0
+int G_TD6 = 0
+int G_TD7 = 0
+int G_TD8 = 0
+int G_TD9 = 0
+int G_TD10 = 0
+int G_TD11 = 0
+int G_TD12 = 0
+int G_TD13 = 0
+int G_TD14 = 0
+int G_TD15 = 0
+int G_TD16 = 0
+int G_TD17 = 0
+int G_TD18 = 0
+int G_TD19 = 0
+int G_TD20 = 0
+int G_TD21 = 0
+int G_TD22 = 0
+int G_TD23 = 0
+int G_TD24 = 0
+int G_TD25 = 0
+int G_TD26 = 0
+int G_TD27 = 0
+int G_TD28 = 0
+int G_TD29 = 0
+int G_TD30 = 0
+int G_TD31 = 0
+
+fn todo_item_get(int i) string {
+    if (i == 0) { return G_TI0 }
+    if (i == 1) { return G_TI1 }
+    if (i == 2) { return G_TI2 }
+    if (i == 3) { return G_TI3 }
+    if (i == 4) { return G_TI4 }
+    if (i == 5) { return G_TI5 }
+    if (i == 6) { return G_TI6 }
+    if (i == 7) { return G_TI7 }
+    if (i == 8) { return G_TI8 }
+    if (i == 9) { return G_TI9 }
+    if (i == 10) { return G_TI10 }
+    if (i == 11) { return G_TI11 }
+    if (i == 12) { return G_TI12 }
+    if (i == 13) { return G_TI13 }
+    if (i == 14) { return G_TI14 }
+    if (i == 15) { return G_TI15 }
+    if (i == 16) { return G_TI16 }
+    if (i == 17) { return G_TI17 }
+    if (i == 18) { return G_TI18 }
+    if (i == 19) { return G_TI19 }
+    if (i == 20) { return G_TI20 }
+    if (i == 21) { return G_TI21 }
+    if (i == 22) { return G_TI22 }
+    if (i == 23) { return G_TI23 }
+    if (i == 24) { return G_TI24 }
+    if (i == 25) { return G_TI25 }
+    if (i == 26) { return G_TI26 }
+    if (i == 27) { return G_TI27 }
+    if (i == 28) { return G_TI28 }
+    if (i == 29) { return G_TI29 }
+    if (i == 30) { return G_TI30 }
+    if (i == 31) { return G_TI31 }
+    return std.string.string_create("")
+}
+
+fn todo_item_set(int i, string s) void {
+    if (i == 0) { G_TI0 = s }
+    if (i == 1) { G_TI1 = s }
+    if (i == 2) { G_TI2 = s }
+    if (i == 3) { G_TI3 = s }
+    if (i == 4) { G_TI4 = s }
+    if (i == 5) { G_TI5 = s }
+    if (i == 6) { G_TI6 = s }
+    if (i == 7) { G_TI7 = s }
+    if (i == 8) { G_TI8 = s }
+    if (i == 9) { G_TI9 = s }
+    if (i == 10) { G_TI10 = s }
+    if (i == 11) { G_TI11 = s }
+    if (i == 12) { G_TI12 = s }
+    if (i == 13) { G_TI13 = s }
+    if (i == 14) { G_TI14 = s }
+    if (i == 15) { G_TI15 = s }
+    if (i == 16) { G_TI16 = s }
+    if (i == 17) { G_TI17 = s }
+    if (i == 18) { G_TI18 = s }
+    if (i == 19) { G_TI19 = s }
+    if (i == 20) { G_TI20 = s }
+    if (i == 21) { G_TI21 = s }
+    if (i == 22) { G_TI22 = s }
+    if (i == 23) { G_TI23 = s }
+    if (i == 24) { G_TI24 = s }
+    if (i == 25) { G_TI25 = s }
+    if (i == 26) { G_TI26 = s }
+    if (i == 27) { G_TI27 = s }
+    if (i == 28) { G_TI28 = s }
+    if (i == 29) { G_TI29 = s }
+    if (i == 30) { G_TI30 = s }
+    if (i == 31) { G_TI31 = s }
+}
+
+fn todo_done_get(int i) int {
+    if (i == 0) { return G_TD0 }
+    if (i == 1) { return G_TD1 }
+    if (i == 2) { return G_TD2 }
+    if (i == 3) { return G_TD3 }
+    if (i == 4) { return G_TD4 }
+    if (i == 5) { return G_TD5 }
+    if (i == 6) { return G_TD6 }
+    if (i == 7) { return G_TD7 }
+    if (i == 8) { return G_TD8 }
+    if (i == 9) { return G_TD9 }
+    if (i == 10) { return G_TD10 }
+    if (i == 11) { return G_TD11 }
+    if (i == 12) { return G_TD12 }
+    if (i == 13) { return G_TD13 }
+    if (i == 14) { return G_TD14 }
+    if (i == 15) { return G_TD15 }
+    if (i == 16) { return G_TD16 }
+    if (i == 17) { return G_TD17 }
+    if (i == 18) { return G_TD18 }
+    if (i == 19) { return G_TD19 }
+    if (i == 20) { return G_TD20 }
+    if (i == 21) { return G_TD21 }
+    if (i == 22) { return G_TD22 }
+    if (i == 23) { return G_TD23 }
+    if (i == 24) { return G_TD24 }
+    if (i == 25) { return G_TD25 }
+    if (i == 26) { return G_TD26 }
+    if (i == 27) { return G_TD27 }
+    if (i == 28) { return G_TD28 }
+    if (i == 29) { return G_TD29 }
+    if (i == 30) { return G_TD30 }
+    if (i == 31) { return G_TD31 }
+    return 0
+}
+
+fn todo_done_set(int i, int v) void {
+    if (i == 0) { G_TD0 = v }
+    if (i == 1) { G_TD1 = v }
+    if (i == 2) { G_TD2 = v }
+    if (i == 3) { G_TD3 = v }
+    if (i == 4) { G_TD4 = v }
+    if (i == 5) { G_TD5 = v }
+    if (i == 6) { G_TD6 = v }
+    if (i == 7) { G_TD7 = v }
+    if (i == 8) { G_TD8 = v }
+    if (i == 9) { G_TD9 = v }
+    if (i == 10) { G_TD10 = v }
+    if (i == 11) { G_TD11 = v }
+    if (i == 12) { G_TD12 = v }
+    if (i == 13) { G_TD13 = v }
+    if (i == 14) { G_TD14 = v }
+    if (i == 15) { G_TD15 = v }
+    if (i == 16) { G_TD16 = v }
+    if (i == 17) { G_TD17 = v }
+    if (i == 18) { G_TD18 = v }
+    if (i == 19) { G_TD19 = v }
+    if (i == 20) { G_TD20 = v }
+    if (i == 21) { G_TD21 = v }
+    if (i == 22) { G_TD22 = v }
+    if (i == 23) { G_TD23 = v }
+    if (i == 24) { G_TD24 = v }
+    if (i == 25) { G_TD25 = v }
+    if (i == 26) { G_TD26 = v }
+    if (i == 27) { G_TD27 = v }
+    if (i == 28) { G_TD28 = v }
+    if (i == 29) { G_TD29 = v }
+    if (i == 30) { G_TD30 = v }
+    if (i == 31) { G_TD31 = v }
+}
+
+# 取证日志：void() 不能作函数参数，故传路径由模块自行打开（append 模式）
+export fn todo_open_log(cstring path) void {
+    G_TODO_LOG = std.io.file_open(path, "a")
+}
+
+# 单句柄落盘；入口经本函数写日志，避免双 FILE* 互踩
+export fn todo_log(string s) void {
+    if (G_TODO_LOG == null) {
+        return
+    }
+    string nl = std.string.string_create("\n")
+    std.io.file_write(G_TODO_LOG, s.ptr, std.string.string_length(s))
+    std.io.file_write(G_TODO_LOG, nl.ptr, 1)
+    std.io.file_flush(G_TODO_LOG)
+}
+
+export fn todo_init() void {
+    G_TODO_COUNT = 0
+    G_TODO_INPUT = ""
+}
+
+# ---------- 添加（按钮与 submit 共用） ----------
+fn todo_do_add() void {
+    string empty = std.string.string_create("")
+    if (std.string.string_is_empty(G_TODO_INPUT)) {
+        todo_log("[todo] add skipped: empty input")
+        bridge_refresh()
+        return
+    }
+    if (G_TODO_COUNT >= TODO_CAP) {
+        todo_log("[todo] add skipped: capacity reached")
+        bridge_refresh()
+        return
+    }
+    # payload 仅在事件期间有效，string_create 拷贝长期持有
+    string item = std.string.string_create(G_TODO_INPUT.ptr)
+    todo_item_set(G_TODO_COUNT, item)
+    todo_done_set(G_TODO_COUNT, 0)
+    G_TODO_COUNT = G_TODO_COUNT + 1
+    todo_log(std.string.string_concat(std.string.string_create("[todo] add: "), item))
+    G_TODO_INPUT = empty
+    bridge_refresh()
+}
+
+# ---------- 事件 handler ----------
+# input 事件：实时捕获输入框 value
+fn todo_on_input(cstring payload) void {
+    G_TODO_INPUT = std.string.string_create(payload)
+    # 仅记录状态，不 refresh（避免逐字重渲染打断输入）
+    todo_log(std.string.string_concat(std.string.string_create("[todo] input -> "), G_TODO_INPUT))
+}
+
+# 添加按钮
+fn todo_on_add(cstring payload) void {
+    todo_do_add()
+}
+
+# form submit（回车）：shell.kl 拦截后 payload 形如 "text=xxx"
+fn todo_on_submit(cstring payload) void {
+    string s = std.string.string_create(payload)
+    string pfx = std.string.string_create("text=")
+    if (std.string.string_starts_with(s, pfx)) {
+        G_TODO_INPUT = std.string.string_substring(s, 5, std.string.string_length(s))
+    }
+    todo_log("[todo] submit")
+    todo_do_add()
+}
+
+# ---------- 行操作（完成/删除） ----------
+# click 事件 value 为空无法区分条目，故每行用迷你 form + 隐藏 input：
+# 点「完成」提交 v=t:<idx>，点「删除」提交 v=d:<idx>（shell.kl 拦截
+# submit 并把表单字段序列化为 value）。
+fn todo_parse_idx(string s) int {
+    size_t ci = std.string.string_index_of(s, ':')
+    size_t ln = std.string.string_length(s)
+    if (ci >= ln) {
+        return -1
+    }
+    string ns = std.string.string_substring(s, ci + 1, ln)
+    return as<int>(std.string.string_to_int(ns))
+}
+
+fn todo_on_row(cstring payload) void {
+    string s = std.string.string_create(payload)
+    string pfx = std.string.string_create("v=")
+    string body = s
+    if (std.string.string_starts_with(s, pfx)) {
+        body = std.string.string_substring(s, 2, std.string.string_length(s))
+    }
+    char op = std.string.string_char_at(body, 0)
+    int idx = todo_parse_idx(body)
+    if (idx < 0) {
+        todo_log("[todo] row submit: bad payload")
+        return
+    }
+    if (idx >= G_TODO_COUNT) {
+        todo_log("[todo] row submit: idx out of range")
+        return
+    }
+    int i = 0
+    int j = 0
+    int v = 0
+    string nx = std.string.string_create("")
+    if (op == 't') {
+        # 完成切换
+        v = todo_done_get(idx)
+        if (v == 1) {
+            v = 0
+        } else {
+            v = 1
+        }
+        todo_done_set(idx, v)
+        todo_log(std.string.string_concat(std.string.string_create("[todo] toggle #"), std.string.string_create_from_int(idx)))
+    } else if (op == 'd') {
+        # 删除：整体前移一位
+        i = idx
+        while (i < G_TODO_COUNT - 1) {
+            j = i + 1
+            nx = todo_item_get(j)
+            todo_item_set(i, nx)
+            todo_done_set(i, todo_done_get(j))
+            i = i + 1
+        }
+        G_TODO_COUNT = G_TODO_COUNT - 1
+        todo_log(std.string.string_concat(std.string.string_create("[todo] delete #"), std.string.string_create_from_int(idx)))
+    } else {
+        todo_log("[todo] row submit: unknown op")
+        return
+    }
+    bridge_refresh()
+}
+
+# ---------- 渲染 ----------
+export fn todo_view() cstring {
+    # ---- 全部局部声明提升到函数顶层（块内声明触发 KMM 回卷） ----
+    int root = kw_div()
+    int card = kw_div()
+    int title = kw_p("待办清单")
+    int sub = kw_p("")
+    int form = kw_form()
+    int inp = kw_input("text")
+    int btn_add = kw_button("添加")
+    int list = kw_div()
+    int i = 0
+    int row = 0
+    int txt = 0
+    int form_t = 0
+    int hid_t = 0
+    int btn_t = 0
+    int form_d = 0
+    int hid_d = 0
+    int btn_d = 0
+    string item_s = std.string.string_create("")
+    string va = std.string.string_create("")
+    string hv = std.string.string_create("")
+    string stat_txt = std.string.string_create("")
+    int done_n = 0
+    int stat = 0
+
+    kw_set_style_str(root, "min-height:100vh;display:flex;justify-content:center;padding:36px 16px;background:radial-gradient(130% 100% at 80% 0%, #17202e 0%, #0d1117 60%, #090b0f 100%);")
+
+    kw_set_style_str(card, "width:100%;max-width:540px;padding:28px 30px;height:fit-content;background:linear-gradient(165deg,#1a2130,#131926);border:1px solid #2b3850;border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,0.5);")
+    kw_add(root, card)
+
+    kw_set_style_str(title, "font-size:24px;font-weight:650;color:#eef2f9;margin-bottom:2px;")
+    kw_add(card, title)
+
+    kw_set_style_str(sub, "font-size:12px;color:#67789a;margin-bottom:16px;")
+    kw_set_text(sub, "input / submit / 列表动态渲染")
+    kw_add(card, sub)
+
+    # 输入区：form 承载 submit（回车）；input 事件实时捕获 value
+    kw_on(form, "submit", as<cstring>(todo_on_submit))
+    kw_set_attr(form, "style=\"display:flex;gap:10px;margin-bottom:16px\"")
+    kw_set_attr(inp, "name=\"text\"")
+    kw_set_attr(inp, "placeholder=\"输入待办，回车或点击添加\"")
+    kw_set_attr(inp, "autocomplete=\"off\"")
+    if (std.string.string_is_empty(G_TODO_INPUT)) {
+    } else {
+        va = std.string.string_create("value=\"")
+        va = std.string.string_concat(va, G_TODO_INPUT)
+        va = std.string.string_concat(va, "\"")
+        kw_set_attr(inp, va)
+    }
+    kw_set_style_str(inp, "flex:1;padding:11px 14px;border:1px solid #33415c;border-radius:10px;background:#0f141d;color:#e7ecf5;font-size:15px;outline:none;")
+    kw_on(inp, "input", as<cstring>(todo_on_input))
+    kw_add(form, inp)
+    kw_set_style_str(btn_add, "padding:11px 22px;border:0;border-radius:10px;font-size:15px;font-weight:600;color:#0b1220;background:linear-gradient(135deg,#7fe0b0,#3fbf8a);box-shadow:0 6px 16px rgba(63,191,138,0.3);")
+    kw_on(btn_add, "click", as<cstring>(todo_on_add))
+    kw_add(form, btn_add)
+    kw_add(card, form)
+
+    # 列表：每项 = 文本（完成加删除线）+ 完成切换 + 删除
+    kw_set_style_str(list, "display:flex;flex-direction:column;gap:8px;")
+    kw_add(card, list)
+    while (i < G_TODO_COUNT) {
+        item_s = todo_item_get(i)
+        row = kw_div()
+        kw_set_style_str(row, "display:flex;align-items:center;gap:10px;padding:10px 12px;background:#161d2a;border:1px solid #26314a;border-radius:10px;")
+        txt = kw_p(item_s)
+        if (todo_done_get(i) == 1) {
+            kw_set_style_str(txt, "flex:1;font-size:15px;color:#5c6b85;text-decoration:line-through;")
+        } else {
+            kw_set_style_str(txt, "flex:1;font-size:15px;color:#dbe4f2;")
+        }
+        kw_add(row, txt)
+        # 完成切换：迷你 form，隐藏 input 携带 v=t:<idx>
+        form_t = kw_form()
+        kw_set_attr(form_t, "style=\"display:inline\"")
+        hid_t = kw_input("hidden")
+        hv = std.string.string_create("name=\"v\" value=\"t:")
+        hv = std.string.string_concat_int(hv, i)
+        hv = std.string.string_concat(hv, std.string.string_create("\""))
+        kw_set_attr(hid_t, hv)
+        kw_add(form_t, hid_t)
+        btn_t = kw_button("完成")
+        kw_set_style_str(btn_t, "padding:5px 12px;border:1px solid #33415c;border-radius:8px;font-size:12px;color:#9fb2d2;background:#1a2334;")
+        kw_add(form_t, btn_t)
+        kw_on(form_t, "submit", as<cstring>(todo_on_row))
+        kw_add(row, form_t)
+        # 删除：迷你 form，隐藏 input 携带 v=d:<idx>
+        form_d = kw_form()
+        kw_set_attr(form_d, "style=\"display:inline\"")
+        hid_d = kw_input("hidden")
+        hv = std.string.string_create("name=\"v\" value=\"d:")
+        hv = std.string.string_concat_int(hv, i)
+        hv = std.string.string_concat(hv, std.string.string_create("\""))
+        kw_set_attr(hid_d, hv)
+        kw_add(form_d, hid_d)
+        btn_d = kw_button("删除")
+        kw_set_style_str(btn_d, "padding:5px 12px;border:1px solid #4a3040;border-radius:8px;font-size:12px;color:#d98a9a;background:#241a22;")
+        kw_add(form_d, btn_d)
+        kw_on(form_d, "submit", as<cstring>(todo_on_row))
+        kw_add(row, form_d)
+        kw_add(list, row)
+        i = i + 1
+    }
+
+    # 底部统计：剩余 n 项
+    done_n = 0
+    i = 0
+    while (i < G_TODO_COUNT) {
+        if (todo_done_get(i) == 1) {
+            done_n = done_n + 1
+        }
+        i = i + 1
+    }
+    stat_txt = std.string.string_create("剩余 ")
+    stat_txt = std.string.string_concat_int(stat_txt, G_TODO_COUNT - done_n)
+    stat_txt = std.string.string_concat(stat_txt, std.string.string_create(" 项"))
+    stat = kw_p(stat_txt)
+    kw_set_style_str(stat, "margin-top:16px;font-size:13px;color:#7587a8;text-align:center;")
+    kw_add(card, stat)
+
+    G_TODO_VIEW_BUF = kw_render_elem(root)
+    todo_log(std.string.string_concat(std.string.string_create("[todo] view len: "), std.string.string_create_from_int(std.string.string_length(G_TODO_VIEW_BUF))))
+    return G_TODO_VIEW_BUF.ptr
+}
+

@@ -1,0 +1,321 @@
+# ============================================================
+# backend_webview.kl — Kaula WebUI native webview 后端
+# ------------------------------------------------------------
+# 依赖 pkglib/webview（webview.json C API）。
+# extern 调用子集（经 import webview 由 pkglib 解析，签名与 webview.json 一致）：
+#   webview_create / webview_set_title / webview_set_size / webview_bind /
+#   webview_init / webview_set_html / webview_eval / webview_run /
+#   webview_dispatch / webview_destroy
+#
+# webview 调用顺序硬约束：
+#   create -> set_title/set_size -> bind -> init -> set_html -> run
+#   （bind/init 必须早于 set_html，否则注入静默失效）
+#
+# 启动流程（用户 main 依次调用）：
+#   app_set_render(as<cstring>(view))
+#   bridge_register(as<cstring>(wv_show), as<cstring>(wv_eval))
+#   webview_backend_add_init("...")          # 可选：附加 init 脚本（如自动测试）
+#   webview_backend_start(title, w, h)       # create/title/size/bind/init
+#   kw_start()                               # 首帧渲染 -> wv_show -> webview_set_html
+#   webview_backend_run()                    # 阻塞主循环（窗口关闭后返回）
+#
+# 事件流（实测结论：方案 B 直接处理，无需 webview_dispatch）：
+#   webview_bind 回调在 webview_run 主线程消息泵中执行（probe/wv_smoke 已实测
+#   回调内可安全 webview_eval / webview_return），故回调内：
+#     1) 立即 string_create 拷贝 req（C 侧缓冲仅在回调期间有效）
+#     2) 解包 JSON 数组第一元素（含反转义）
+#     3) 入固定容量环形队列（满则丢最旧）
+#     4) 回调返回前排空队列：kw_event -> handler -> bridge_refresh
+#   队列存在的意义：把「解包/拷贝」与「协议分发」解耦，并为将来跨线程
+#   （worker 线程回调 + dispatch 调度）留出口子。
+#
+# shell 注入说明：
+#   shell.kl 的 JS 胶水已由 bridge.kl kw_page() 内联在首帧页面 <script> 中；
+#   若此处再 webview_init 注入同一胶水，document 监听器会注册两次，
+#   每次点击将重复上报事件，故后端 init 仅承载附加脚本，不重复注入 shell。
+#
+# 日志：GUI 进程 stdout 取证不可靠，关键节点落盘 kw_backend.log
+# （webview_create 失败时提示 WebView2 Runtime 缺失亦落盘）。
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "../webui/element.kl"
+import "../webui/app.kl"
+import "../webui/bridge.kl"
+import "../webui/shell.kl"
+import webview
+
+# ---------- 全局状态 ----------
+# webview 句柄（webview_t = void*）；回调经全局拿句柄做 eval/return
+void() G_WV
+# 后端日志句柄（FILE*）
+void() G_WV_LOG
+# 附加 init 脚本（webview_backend_add_init 累加，start 时一次注入）
+string G_WV_EXTRA_INIT = ""
+
+# 事件环形队列：固定容量，满则丢最旧
+const KW_EVQ_CAP = 16
+string G_EV0 = ""
+string G_EV1 = ""
+string G_EV2 = ""
+string G_EV3 = ""
+string G_EV4 = ""
+string G_EV5 = ""
+string G_EV6 = ""
+string G_EV7 = ""
+string G_EV8 = ""
+string G_EV9 = ""
+string G_EV10 = ""
+string G_EV11 = ""
+string G_EV12 = ""
+string G_EV13 = ""
+string G_EV14 = ""
+string G_EV15 = ""
+int G_EV_HEAD = 0
+int G_EV_COUNT = 0
+
+# ---------- 日志 ----------
+fn bw_log(string s) void {
+    if (G_WV_LOG == null) {
+        return
+    }
+    string nl = std.string.string_create("\n")
+    std.io.file_write(G_WV_LOG, s.ptr, std.string.string_length(s))
+    std.io.file_write(G_WV_LOG, nl.ptr, 1)
+    std.io.file_flush(G_WV_LOG)
+}
+
+# ---------- 环形队列槽位访问（Kaula 无全局数组，if 链代替） ----------
+fn kw_wv_slot_set(int idx, string s) void {
+    if (idx == 0) { G_EV0 = s }
+    if (idx == 1) { G_EV1 = s }
+    if (idx == 2) { G_EV2 = s }
+    if (idx == 3) { G_EV3 = s }
+    if (idx == 4) { G_EV4 = s }
+    if (idx == 5) { G_EV5 = s }
+    if (idx == 6) { G_EV6 = s }
+    if (idx == 7) { G_EV7 = s }
+    if (idx == 8) { G_EV8 = s }
+    if (idx == 9) { G_EV9 = s }
+    if (idx == 10) { G_EV10 = s }
+    if (idx == 11) { G_EV11 = s }
+    if (idx == 12) { G_EV12 = s }
+    if (idx == 13) { G_EV13 = s }
+    if (idx == 14) { G_EV14 = s }
+    if (idx == 15) { G_EV15 = s }
+}
+
+fn kw_wv_slot_get(int idx) string {
+    if (idx == 0) { return G_EV0 }
+    if (idx == 1) { return G_EV1 }
+    if (idx == 2) { return G_EV2 }
+    if (idx == 3) { return G_EV3 }
+    if (idx == 4) { return G_EV4 }
+    if (idx == 5) { return G_EV5 }
+    if (idx == 6) { return G_EV6 }
+    if (idx == 7) { return G_EV7 }
+    if (idx == 8) { return G_EV8 }
+    if (idx == 9) { return G_EV9 }
+    if (idx == 10) { return G_EV10 }
+    if (idx == 11) { return G_EV11 }
+    if (idx == 12) { return G_EV12 }
+    if (idx == 13) { return G_EV13 }
+    if (idx == 14) { return G_EV14 }
+    if (idx == 15) { return G_EV15 }
+    return std.string.string_create("")
+}
+
+fn kw_wv_enqueue(string s) void {
+    int idx = 0
+    if (G_EV_COUNT >= KW_EVQ_CAP) {
+        # 满：丢最旧（head 前移）
+        G_EV_HEAD = G_EV_HEAD + 1
+        if (G_EV_HEAD >= KW_EVQ_CAP) {
+            G_EV_HEAD = 0
+        }
+        G_EV_COUNT = G_EV_COUNT - 1
+    }
+    idx = G_EV_HEAD + G_EV_COUNT
+    if (idx >= KW_EVQ_CAP) {
+        idx = idx - KW_EVQ_CAP
+    }
+    kw_wv_slot_set(idx, s)
+    G_EV_COUNT = G_EV_COUNT + 1
+}
+
+# 排空队列：逐条送入框架统一事件入口 kw_event（bridge.kl）
+fn kw_wv_drain() void {
+    string s = std.string.string_create("")
+    cstring p
+    while (G_EV_COUNT > 0) {
+        s = kw_wv_slot_get(G_EV_HEAD)
+        p = s.ptr
+        kw_event(p)
+        G_EV_HEAD = G_EV_HEAD + 1
+        if (G_EV_HEAD >= KW_EVQ_CAP) {
+            G_EV_HEAD = 0
+        }
+        G_EV_COUNT = G_EV_COUNT - 1
+    }
+}
+
+# ---------- req 解包 ----------
+# webview_bind 回调收到的 req 是 JS 参数包成的 JSON 数组原文，形如：
+#   ["{\"kid\":\"1\",\"type\":\"click\",\"value\":\"\"}"]
+# 取第一元素（JSON 字符串）并反转义，得到 kw_event 需要的协议 JSON 原文。
+# 若 req 不是数组包装（容错），原样返回。
+fn kw_wv_unwrap(string raw) string {
+    string out = std.string.string_create("")
+    size_t n = std.string.string_length(raw)
+    if (n < 4) {
+        return raw
+    }
+    char c0 = std.string.string_char_at(raw, 0)
+    char c1 = std.string.string_char_at(raw, 1)
+    if (c0 != '[') {
+        return raw
+    }
+    if (c1 != '"') {
+        return raw
+    }
+    size_t i = 2
+    bool run = true
+    char c
+    char e
+    while (run) {
+        if (i >= n) {
+            run = false
+        } else {
+            c = std.string.string_char_at(raw, i)
+            if (c == '\\') {
+                i = i + 1
+                if (i >= n) {
+                    run = false
+                } else {
+                    e = std.string.string_char_at(raw, i)
+                    if (e == 'n') {
+                        out = out + "\n"
+                    } else if (e == 't') {
+                        out = out + "\t"
+                    } else if (e == 'r') {
+                        out = out + "\r"
+                    } else {
+                        out = std.string.string_concat_char(out, e)
+                    }
+                    i = i + 1
+                }
+            } else if (c == '"') {
+                run = false
+            } else {
+                out = std.string.string_concat_char(out, c)
+                i = i + 1
+            }
+        }
+    }
+    return out
+}
+
+# ---------- bind 回调 ----------
+# 顶层具名函数，签名与 webview bind ABI 一致：(seq, req, arg)。
+# #[no_kmm]：纯 C ABI 上下文；内部 string_create 拷贝使 payload 脱离
+# C 侧缓冲生命周期（落入长寿命分配区）。
+#[no_kmm]
+fn wv_event_cb(seq: cstring, req: cstring, arg: void()) void {
+    if (G_WV != null) {
+        webview.webview_return(G_WV, seq, 0, "0")
+    }
+    # 立即拷贝：req 仅在回调期间有效
+    string raw = std.string.string_create(req)
+    string payload = kw_wv_unwrap(raw)
+    bw_log(std.string.string_concat(std.string.string_create("[backend] event payload="), payload))
+    kw_wv_enqueue(payload)
+    # bind 回调在主线程消息泵中执行，直接排空处理（方案 B）
+    kw_wv_drain()
+}
+
+# ---------- Platform 函数（bridge_register 注册对象） ----------
+# show_fn：首帧整页 HTML -> webview_set_html
+export fn wv_show(cstring html) void {
+    if (G_WV == null) {
+        return
+    }
+    webview.webview_set_html(G_WV, html)
+    bw_log(std.string.string_create("[backend] show -> webview_set_html done (first frame)"))
+}
+
+# eval_fn：后续帧 kw_render("...") 等任意 JS -> webview_eval
+export fn wv_eval(cstring js) void {
+    if (G_WV == null) {
+        return
+    }
+    webview.webview_eval(G_WV, js)
+}
+
+# ---------- 附加 init 脚本（须在 start 前调用，可多次） ----------
+export fn webview_backend_add_init(cstring js) void {
+    string seg = std.string.string_create(js)
+    G_WV_EXTRA_INIT = std.string.string_concat(G_WV_EXTRA_INIT, seg)
+}
+
+# ---------- 后端启动 ----------
+# create -> set_title/set_size -> bind -> init（顺序硬约束）
+# 首帧 set_html 由 kw_start() 经 wv_show 下发（在 run 之前，满足顺序）
+# ip 声明提升到函数顶层：块内声明会让编译器给 else 块包裹 KMM_V4_SCOPE，
+# 其 scope_pop 遇 thread heap refill 会 invalidate 线程堆（项目惯例：声明提升）
+export fn webview_backend_start_debug(string title, int w, int h, int debug) void {
+    cstring ip = null
+    if (G_WV_LOG == null) {
+        G_WV_LOG = std.io.file_open("kw_backend.log", "a")
+    }
+    string m = std.string.string_create("[backend] start: create(debug=")
+    m = std.string.string_concat(m, std.string.string_create_from_int(debug))
+    m = std.string.string_concat(m, std.string.string_create(")"))
+    bw_log(m)
+    void() wv = webview.webview_create(debug, null)
+    if (wv == null) {
+        bw_log(std.string.string_create("[backend][FATAL] webview_create returned null: WebView2 Runtime missing? Install Microsoft Edge WebView2 Runtime."))
+        println("[backend] ERROR: webview_create failed - WebView2 Runtime missing?")
+        return
+    }
+    G_WV = wv
+    bw_log(std.string.string_create("[backend] create OK"))
+    cstring tp = title.ptr
+    webview.webview_set_title(wv, tp)
+    webview.webview_set_size(wv, w, h, 0)
+    # bind 先于 set_html：JS 侧 window.kaula_event -> wv_event_cb
+    webview.webview_bind(wv, "kaula_event", wv_event_cb, null)
+    bw_log(std.string.string_create("[backend] bind kaula_event OK"))
+    # shell 胶水已内联于首帧页面（见文件头说明），init 仅注入附加脚本
+    if (std.string.string_is_empty(G_WV_EXTRA_INIT)) {
+    } else {
+        ip = G_WV_EXTRA_INIT.ptr
+        webview.webview_init(wv, ip)
+        bw_log(std.string.string_create("[backend] extra init script injected"))
+    }
+    bw_log(std.string.string_create("[backend] ready: waiting kw_start() first frame"))
+}
+
+export fn webview_backend_start(string title, int w, int h) void {
+    # debug=1：启用右键检查等调试能力
+    webview_backend_start_debug(title, w, h, 1)
+}
+
+# ---------- 主循环 ----------
+# 须在 kw_start() 之后调用；阻塞直到窗口关闭
+export fn webview_backend_run() void {
+    if (G_WV == null) {
+        return
+    }
+    bw_log(std.string.string_create("[backend] entering webview_run"))
+    webview.webview_run(G_WV)
+    webview.webview_destroy(G_WV)
+    bw_log(std.string.string_create("[backend] run exited, webview destroyed"))
+    if (G_WV_LOG != null) {
+        std.io.file_close(G_WV_LOG)
+        G_WV_LOG = null
+    }
+}
+
+# 注：pkglib 包调用（webview.xxx）已由 import webview 解析 extern 签名，
+# 无需在本文件重复 extern 声明；若需直接 extern（如 strlen）必须置于文件末尾。

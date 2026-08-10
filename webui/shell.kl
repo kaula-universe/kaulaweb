@@ -1,0 +1,20 @@
+# ============================================================
+# shell.kl — Kaula WebUI 框架核心：内置 JS 胶水（用户不可见）
+# ------------------------------------------------------------
+# 职责：
+#   1. 事件委托采集：document 上监听 click/input/change/submit，
+#      向上查找最近的 [data-kid] 元素，组装 {kid,type,value} JSON，
+#      经 window.kaula_event(json) 发回宿主
+#      （native 后端由 webview_bind 提供 kaula_event；
+#        WASM 后端由 shim 提供同名全局函数）
+#   2. window.kw_render(html)：保存焦点元素 data-kid 与光标位置、
+#      滚动位置 -> 替换 #app innerHTML -> 恢复焦点与滚动
+#   3. form 提交拦截（preventDefault 后作为 submit 事件发送）
+#
+# 注意：JS 内统一使用单引号；仅 querySelector 选择器含双引号
+# （在 Kaula 字面量中转义为 \"）。
+# ============================================================
+
+export fn kw_shell_js() string {
+    return "(function(){function kwKidEl(t){var e=t;while(e&&e!==document){if(e.getAttribute&&e.getAttribute('data-kid'))return e;e=e.parentNode}return null}function kwSend(o){try{if(window.kaula_event){window.kaula_event(JSON.stringify(o))}}catch(x){}}document.addEventListener('click',function(ev){var el=kwKidEl(ev.target);if(el){kwSend({kid:el.getAttribute('data-kid'),type:'click',value:''})}},true);document.addEventListener('input',function(ev){var el=kwKidEl(ev.target);if(el){kwSend({kid:el.getAttribute('data-kid'),type:'input',value:String(ev.target.value)})}},true);document.addEventListener('change',function(ev){var el=kwKidEl(ev.target);if(el){kwSend({kid:el.getAttribute('data-kid'),type:'change',value:String(ev.target.value)})}},true);document.addEventListener('submit',function(ev){var f=ev.target;if(!f)return;if(ev.preventDefault){ev.preventDefault()}var el=kwKidEl(f);var kid='';if(el){kid=el.getAttribute('data-kid')}var parts=[];if(f.elements){for(var i=0;i<f.elements.length;i++){var c=f.elements[i];if(c.name){parts.push(c.name+'='+String(c.value))}}}kwSend({kid:kid,type:'submit',value:parts.join('&')})},true);window.kw_render=function(html){var app=document.getElementById('app');if(!app)return;var fk=null;var fs=-1;var fe=-1;var ae=document.activeElement;if(ae&&ae.getAttribute){fk=ae.getAttribute('data-kid');try{if(typeof ae.selectionStart=='number'){fs=ae.selectionStart;fe=ae.selectionEnd}}catch(x){}}var sy=0;try{sy=window.scrollY||0}catch(x){}app.innerHTML=html;if(fk){var t=document.querySelector('[data-kid=\"'+fk+'\"]');if(t){try{t.focus();if(fs>=0&&t.setSelectionRange){t.setSelectionRange(fs,fe)}}catch(x){}}}try{window.scrollTo(0,sy)}catch(x){}}})();"
+}

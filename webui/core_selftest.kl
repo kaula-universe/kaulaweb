@@ -1,0 +1,161 @@
+# ============================================================
+# core_selftest.kl — 框架核心编译与行为自测（临时入口）
+# 编译：在 kaula\kaula-compiler 目录下
+#   .\kaulac.exe "..\..\kaula-webui\webui\core_selftest.kl"
+# 取证：运行后查看 core_selftest.out.txt
+# ============================================================
+import std.io
+import std.string
+import std.container
+import "element.kl"
+import "app.kl"
+import "bridge.kl"
+import "shell.kl"
+
+# ---------- 用户侧模拟 ----------
+int G_CLICKS = 0
+string G_LAST_INPUT = ""
+string G_SENT_PAGE = ""
+string G_SENT_JS = ""
+
+string G_REPORT = ""
+bool G_ALL_OK = true
+
+fn on_inc(cstring payload) void {
+    G_CLICKS = G_CLICKS + 1
+}
+
+fn on_input(cstring payload) void {
+    G_LAST_INPUT = std.string.string_create(payload)
+}
+
+fn rec_show(cstring html) void {
+    G_SENT_PAGE = std.string.string_create(html)
+}
+
+fn rec_eval(cstring js) void {
+    G_SENT_JS = std.string.string_create(js)
+}
+
+# 视图：div > (h1, button, input)；按钮/输入框带事件
+# 渲染回调约定返回 cstring：结果存全局 string 后返回 .ptr
+string G_VIEW_BUF = ""
+fn view() cstring {
+    int root = kw_div()
+    kw_set_attr(root, "class=\"box\"")
+    int st = kw_style()
+    kw_sty_bg(st, "#20242c")
+    kw_sty_pad(st, "8px")
+    kw_set_style(root, st)
+
+    int h1 = kw_elem("h1")
+    kw_set_text(h1, "Counter & <escape> \"test\"")
+    kw_add(root, h1)
+
+    int btn = kw_button("inc")
+    kw_on(btn, "click", as<cstring>(on_inc))
+    kw_add(root, btn)
+
+    int inp = kw_input("text")
+    kw_on(inp, "input", as<cstring>(on_input))
+    kw_add(root, inp)
+
+    G_VIEW_BUF = kw_render_elem(root)
+    return G_VIEW_BUF.ptr
+}
+
+fn check(string name, bool ok) void {
+    if (ok) {
+        G_REPORT = G_REPORT + "PASS " + name + "\n"
+    } else {
+        G_REPORT = G_REPORT + "FAIL " + name + "\n"
+        G_ALL_OK = false
+    }
+}
+
+fn contains(string hay, string needle) bool {
+    return std.string.string_contains_string(hay, needle)
+}
+
+fn main() {
+    # ---------- 1. 启动管线：注册渲染回调 + 平台函数 + 首帧 ----------
+    kw_init()
+    app_set_render(as<cstring>(view))
+    bridge_register(as<cstring>(rec_show), as<cstring>(rec_eval))
+    bridge_render()
+
+    check("first-frame page delivered", as<int>(std.string.string_length(G_SENT_PAGE)) > 0)
+    check("page has #app container", contains(G_SENT_PAGE, "<div id=\"app\">"))
+    check("page has shell glue", contains(G_SENT_PAGE, "kaula_event"))
+    check("page has base css", contains(G_SENT_PAGE, "#app{"))
+    check("html escaped in text", contains(G_SENT_PAGE, "&lt;escape&gt;"))
+    check("attr quote escaped", contains(G_SENT_PAGE, "&quot;test&quot;"))
+    check("button has data-kid", contains(G_SENT_PAGE, "data-kid=\"0\""))
+    check("input has data-kid", contains(G_SENT_PAGE, "data-kid=\"1\""))
+    check("style rendered", contains(G_SENT_PAGE, "background:#20242c"))
+    check("registry has 2 bindings", kw_registry_size() == 2)
+
+    # ---------- 2. 事件分发（模拟后端调用 kw_event） ----------
+    string ev_click = "{\"kid\":\"0\",\"type\":\"click\",\"value\":\"\"}"
+    cstring ec = ev_click.ptr
+    kw_event(ec)
+    check("click dispatched", G_CLICKS == 1)
+
+    string ev_input = "{\"kid\":\"1\",\"type\":\"input\",\"value\":\"hello\"}"
+    cstring ei = ev_input.ptr
+    kw_event(ei)
+    check("input dispatched", std.string.string_equals(G_LAST_INPUT, "hello"))
+
+    # value 内含转义双引号
+    string ev_esc = "{\"kid\":\"1\",\"type\":\"input\",\"value\":\"a\\\"b\"}"
+    cstring ee = ev_esc.ptr
+    kw_event(ee)
+    check("escaped value unescaped", std.string.string_equals(G_LAST_INPUT, "a\"b"))
+
+    # 未注册的 type 不应触发
+    string ev_bad = "{\"kid\":\"0\",\"type\":\"nope\",\"value\":\"\"}"
+    cstring eb = ev_bad.ptr
+    kw_event(eb)
+    check("unknown type ignored", G_CLICKS == 1)
+
+    # kw_json_get 直测
+    string js1 = "{\"kid\":\"42\",\"type\":\"x\"}"
+    check("json_get kid", std.string.string_equals(kw_json_get(js1, "kid"), "42"))
+    check("json_get missing", std.string.string_is_empty(kw_json_get(js1, "value")))
+
+    # ---------- 3. 刷新帧：eval kw_render + 注册表重建 ----------
+    G_SENT_JS = ""
+    bridge_refresh()
+    check("refresh uses eval", as<int>(std.string.string_length(G_SENT_JS)) > 0)
+    check("refresh calls kw_render", contains(G_SENT_JS, "kw_render(\""))
+    check("refresh rebuilt registry", kw_registry_size() == 2)
+    check("refresh html escaped for js", contains(G_SENT_JS, "&lt;escape&gt;"))
+
+    # ---------- 4. shell 胶水自检 ----------
+    string sh = kw_shell_js()
+    check("shell has kw_render", contains(sh, "window.kw_render"))
+    check("shell intercepts submit", contains(sh, "preventDefault"))
+    check("shell sends json", contains(sh, "JSON.stringify"))
+
+    # ---------- 5. Style 构建器直测 ----------
+    int s2 = kw_style()
+    kw_sty_display(s2, "flex")
+    kw_sty_gap(s2, "8px")
+    kw_sty_justify(s2, "center")
+    check("style builder css", std.string.string_equals(kw_style_css(s2), "display:flex;gap:8px;justify-content:center;"))
+
+    # ---------- 落盘取证 ----------
+    if (G_ALL_OK) {
+        G_REPORT = G_REPORT + "RESULT ALL-PASS\n"
+    } else {
+        G_REPORT = G_REPORT + "RESULT HAS-FAILURES\n"
+    }
+    void() f = std.io.file_open("core_selftest.out.txt", "w")
+    if (f == null) {
+        println("[selftest] cannot open output file")
+    } else {
+        std.io.file_write(f, G_REPORT.ptr, std.string.string_length(G_REPORT))
+        std.io.file_close(f)
+    }
+    println(G_REPORT)
+}
