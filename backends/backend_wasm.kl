@@ -57,8 +57,12 @@ fn on_click(cstring payload) void {
     bridge_refresh()
 }
 
+# Task #20（内存确定性）：G_NAME 跨事件持有（后续每次渲染都读它）。
+# handler 在 kw_event 的 KMM 作用域内被同步调用，旧版 string_create
+# 的载荷落该作用域 thread heap，kw_event 返回 scope_pop 即悬垂——
+# 之前全靠 alloc_auto 慢路径偶然落幸存段才未爆。改用长寿命 API。
 fn on_type(cstring payload) void {
-    G_NAME = std.string.string_create(payload)
+    G_NAME = std.string.string_create_global(payload)
     bridge_refresh()
 }
 

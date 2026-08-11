@@ -127,8 +127,16 @@ export fn kw_json_get(string json, string key) string {
 
 # ---------- 统一事件入口 ----------
 # json 形如 {"kid":"3","type":"input","value":"abc"}
+# Task #20（内存确定性）：payload 首次落地用 string_create_global 拷入
+# 长寿命幸存段。kw_event 无 #[no_kmm]，编译器包 KMM 作用域：旧版
+# string_create(json) 的载荷随 kw_event 返回 scope_pop 回卷，handler 内
+# 跨调用持有的引用（如 backend_wasm 的 G_NAME）全靠 alloc_auto 慢路径
+# 偶然落幸存段才“能用”；现改为确定性长活。不加 #[no_kmm]：它会把
+# 全部解析/渲染临时分配也永久留在池内（泄漏式），长寿命拷贝是改动最小、
+# 语义最清晰的确定性方案。native 侧（wv_event_cb -> kw_wv_drain 同步调
+# 入）仅略增 survivor 占用，语义安全。
 export fn kw_event(cstring json) void {
-    string s = std.string.string_create(json)
+    string s = std.string.string_create_global(json)
     string kid_s = kw_json_get(s, "kid")
     if (std.string.string_is_empty(kid_s)) {
         return

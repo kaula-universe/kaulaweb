@@ -22,7 +22,8 @@
 # 事件流（实测结论：方案 B 直接处理，无需 webview_dispatch）：
 #   webview_bind 回调在 webview_run 主线程消息泵中执行（probe/wv_smoke 已实测
 #   回调内可安全 webview_eval / webview_return），故回调内：
-#     1) 立即 string_create 拷贝 req（C 侧缓冲仅在回调期间有效）
+#     1) 立即 string_create_global 拷贝 req 到长寿命幸存段（C 侧缓冲仅在
+#        回调期间有效；Task #18 后不再依赖 #[no_kmm] 的“意外长活”）
 #     2) 解包 JSON 数组第一元素（含反转义）
 #     3) 入固定容量环形队列（满则丢最旧）
 #     4) 回调返回前排空队列：kw_event -> handler -> bridge_refresh
@@ -165,6 +166,9 @@ fn kw_wv_drain() void {
 #   ["{\"kid\":\"1\",\"type\":\"click\",\"value\":\"\"}"]
 # 取第一元素（JSON 字符串）并反转义，得到 kw_event 需要的协议 JSON 原文。
 # 若 req 不是数组包装（容错），原样返回。
+# 内存口径（Task #18）：逐字符 concat 的中间产物与最终 out 都是短命
+# 临时量——入队的 out 在同回调内被 kw_wv_drain 同步消费完毕（drain
+# 在回调返回前执行），无需长寿命分配；raw 由调用方以长寿命 API 拷贝。
 fn kw_wv_unwrap(string raw) string {
     string out = std.string.string_create("")
     size_t n = std.string.string_length(raw)
@@ -218,15 +222,18 @@ fn kw_wv_unwrap(string raw) string {
 
 # ---------- bind 回调 ----------
 # 顶层具名函数，签名与 webview bind ABI 一致：(seq, req, arg)。
-# #[no_kmm]：纯 C ABI 上下文；内部 string_create 拷贝使 payload 脱离
-# C 侧缓冲生命周期（落入长寿命分配区）。
-#[no_kmm]
+# Task #18：去掉 #[no_kmm]。旧版靠 #[no_kmm] 跳过作用域包裹使
+# string_create 的载荷“意外长活”，SOR 迁移后仅浅拷贝 {len,ptr} 外壳
+# 即悬垂（Bug 2）。现改用 string_create_global 从幸存段确定性长活，
+# 回调内其余分配（unwrap concat、日志串）均为短命临时量：drain 在
+# 回调返回前同步消费完毕，作用域回卷无害（wv_smoke 探针已实测默认
+# KMM 回调作为 bind handler 工作正常）。
 fn wv_event_cb(seq: cstring, req: cstring, arg: void()) void {
     if (G_WV != null) {
         webview.webview_return(G_WV, seq, 0, "0")
     }
-    # 立即拷贝：req 仅在回调期间有效
-    string raw = std.string.string_create(req)
+    # 立即拷贝到长寿命幸存段：req 仅在回调期间有效
+    string raw = std.string.string_create_global(req)
     string payload = kw_wv_unwrap(raw)
     bw_log(std.string.string_concat(std.string.string_create("[backend] event payload="), payload))
     kw_wv_enqueue(payload)

@@ -6,7 +6,9 @@
 # 渲染回调（函数指针）经 app_set_render 注册。
 #
 # handler 约定：void(cstring)，参数为事件 payload（value 字段原文）；
-# 需要长期持有时请在 handler 内用 std.string.string_create 拷贝。
+# 需要长期持有时在 handler 内用 std.string.string_create_global 拷贝
+# （Task #20：handler 在 kw_event 的 KMM 作用域内被同步调用，普通
+# string_create 的载荷随 kw_event 返回 scope_pop 回卷，跨调用持有即悬垂）。
 # ============================================================
 import std.io
 import std.string

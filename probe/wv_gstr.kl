@@ -1,0 +1,63 @@
+# wv_gstr.kl - 长寿命字符串探针（Task #18）
+# 验证链路: string_create_global 载荷在默认 KMM（作用域包裹）bind 回调中
+# 创建 -> 存全局 -> 作用域回卷 -> 下一个回调读出完好（跨回调存活 PASS）。
+# 注意：webview bind 的 req 是 JSON 数组包裹（["payload"]），断言按此口径。
+# 模式参考 probe/wv_smoke.kl 的 store/check 双回调对照。
+import std.io
+import std.string
+import webview
+
+void() G_WV
+void() G_LOG
+string G_LAST = ""
+
+fn log_line(string s) void {
+    string nl = std.string.string_create("\n")
+    std.io.file_write(G_LOG, s.ptr, std.string.string_length(s))
+    std.io.file_write(G_LOG, nl.ptr, 1)
+    std.io.file_flush(G_LOG)
+}
+
+# 回调 A（默认 KMM，无 #[no_kmm]）：payload 以长寿命 API 拷贝入全局。
+# 回调返回时编译器作用域回卷——载荷在幸存段，不受影响。
+fn store_handler(seq: cstring, req: cstring, arg: void()) void {
+    G_LAST = std.string.string_create_global(req)
+    log_line(std.string.string_concat(std.string.string_create("[wv_gstr] stored global req="), G_LAST))
+    webview.webview_return(G_WV, seq, 0, "\"stored\"")
+}
+
+# 回调 B（默认 KMM）：读出上一回调存入全局的长寿命串并断言内容完好
+fn check_handler(seq: cstring, req: cstring, arg: void()) void {
+    log_line(std.string.string_concat(std.string.string_create("[wv_gstr] cross-callback G_LAST="), G_LAST))
+    if (std.string.string_equals(G_LAST, std.string.string_create("[\"global-payload-42\"]"))) {
+        log_line(std.string.string_create("[wv_gstr] PASS: global string survived across callbacks/scope rewind"))
+    } else {
+        log_line(std.string.string_create("[wv_gstr] FAIL: global string corrupted or lost"))
+    }
+    webview.webview_return(G_WV, seq, 0, "\"checked\"")
+}
+
+fn main() {
+    G_LOG = std.io.file_open("wv_gstr.log", "w")
+    log_line(std.string.string_create("[wv_gstr] creating webview..."))
+    void() w = webview.webview_create(0, null)
+    if w == null {
+        log_line(std.string.string_create("[wv_gstr][FATAL] webview_create returned null"))
+        std.io.file_close(G_LOG)
+        return
+    }
+    G_WV = w
+    webview.webview_set_title(w, "Kaula Global-String Probe")
+    webview.webview_set_size(w, 520, 360, 0)
+    webview.webview_bind(w, "kaula_store", store_handler, null)
+    webview.webview_bind(w, "kaula_check", check_handler, null)
+    # 自动测试注入：t=1s store，t=2s check
+    webview.webview_init(w, "setTimeout(function(){ try { window.kaula_store('global-payload-42'); } catch(e) {} }, 1000);")
+    webview.webview_init(w, "setTimeout(function(){ try { window.kaula_check('verify'); } catch(e) {} }, 2000);")
+    webview.webview_set_html(w, "<!doctype html><html><head><meta charset='utf-8'></head><body style='background:#11151c;color:#e6e6e6;font-family:system-ui'><h1>Global-String Probe</h1><p>auto test running...</p></body></html>")
+    log_line(std.string.string_create("[wv_gstr] entering webview_run"))
+    webview.webview_run(w)
+    webview.webview_destroy(w)
+    log_line(std.string.string_create("[wv_gstr] exited"))
+    std.io.file_close(G_LOG)
+}
