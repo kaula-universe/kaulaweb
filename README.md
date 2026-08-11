@@ -27,36 +27,37 @@ kaula-webui/
 │   ├── counter_native.kl, todo_native.kl   # native 薄入口
 │   └── counter_web.kl, todo_web.kl         # WASM 薄入口（复用同一份逻辑）
 ├── build/
-│   ├── build_native.ps1          # native 构建（封装 kaulac）
-│   ├── build_web.ps1 / build_web.py        # WASM 构建（kaulac -> emcc -> dist\web\）
+│   ├── build_native.py           # native 构建（封装 kaulac，产物归集 dist\native\）
+│   └── build_web.py              # WASM 构建（kaulac -> emcc -> dist\web\）
 ├── probe/wv_smoke.kl             # webview FFI 冒烟探针
-├── dist/native/                  # native 产物（build_native.ps1 归集的 .exe）
+├── dist/native/                  # native 产物（build_native.py 归集的 .exe）
 ├── dist/web/<name>/              # WASM 产物（html/js/wasm）
 ├── docs/architecture.md          # 架构与桥协议文档
+├── docs/deployment.md            # 部署指南（双端环境要求与托管）
 └── legacy/                       # 旧 SSR HTTP 方案存档（webui_all.kl，勿用于新项目）
 ```
 
 ## 构建
 
-两个脚本的详细用法与注意事项见各自文件头注释。
+两个脚本的详细用法与注意事项见各自文件头注释。构建产物的分发与部署（环境要求、静态托管、常见问题）见 [docs/deployment.md](docs/deployment.md)。
 
 ### Native（webview 后端）
 
 ```powershell
 # kaula-webui\build\ 下执行
-.\build_native.ps1 ..\examples\counter_native.kl
+python build_native.py ..\examples\counter_native.kl
 ```
 
-脚本先切到 `kaula\kaula-compiler` 目录调用 `kaulac.exe`（cache/ 与 pkglib 相对配置的硬约束），默认附加 `--no-cache`，并在编译后把产物 `.exe` 归集到 **`dist\native\`**（kaulac 的 `-output-dir` 旗标实测不生效，故用后置 Move 归集；可用 `-OutputDir` 覆盖），保持 examples 源码目录整洁。
+脚本先切到 `kaula\kaula-compiler` 目录调用 `kaulac.exe`（cache/ 与 pkglib 相对配置的硬约束），默认附加 `--no-cache`，并在编译后把产物 `.exe` 归集到 **`dist\native\`**（kaulac 的 `-output-dir` 旗标实测不生效，故用后置移动归集；可用 `-o/--output-dir` 覆盖），保持 examples 源码目录整洁。
 
 ### Web（WASM 后端）
 
 ```powershell
 # kaula-webui\build\ 下执行；任意工作目录均可
-.\build_web.ps1 ..\examples\counter_web.kl -o ..\dist\web\counter_web
+python build_web.py ..\examples\counter_web.kl -o ..\dist\web\counter_web
 ```
 
-`build_web.ps1` 是 `build_web.py` 的 PowerShell 封装，行为完全一致：`kaulac --no-cache` 生成 C → 推导所需 std 模块 → emcc 链接 `wasm_shim.c` 与运行时 → 产物校验 → node 跑 wasm 校验。emcc 不在 PATH 亦可（内部用 `tools\emsdk` 绝对路径）。可选透传参数：`-o/--output-dir`、`--emcc`、`--skip-node-check`。
+`build_web.py` 流程：`kaulac --no-cache` 生成 C → 推导所需 std 模块 → emcc 链接 `wasm_shim.c` 与运行时 → 产物校验 → node 跑 wasm 校验。emcc 不在 PATH 亦可（内部用 `tools\emsdk` 绝对路径）。可选参数：`-o/--output-dir`、`--emcc`、`--skip-node-check`。
 
 产物为静态页（`dist\web\<name>\<name>.html` 等），任意静态服务器打开即可，如：
 
@@ -118,21 +119,21 @@ WASM 薄入口 `examples/counter_web.kl` 更短：`wasm_backend_start()` 注册�
 ## 运行示例
 
 ```powershell
-# native（产物归集在 dist\native\，直接运行）
-.\build\build_native.ps1 .\examples\counter_native.kl
-.\dist\native\counter_native.exe
+# native（产物归集在 dist\native\，直接运行；以下在 kaula-webui\ 下执行）
+python build\build_native.py examples\counter_native.kl
+dist\native\counter_native.exe
 
-.\build\build_native.ps1 .\examples\todo_native.kl
-.\dist\native\todo_native.exe
+python build\build_native.py examples\todo_native.kl
+dist\native\todo_native.exe
 
 # web（产物在 dist\web\<name>\，用静态服务器打开）
-.\build\build_web.ps1 .\examples\counter_web.kl -o .\dist\web\counter_web
-.\build\build_web.ps1 .\examples\todo_web.kl    -o .\dist\web\todo_web
+python build\build_web.py examples\counter_web.kl -o dist\web\counter_web
+python build\build_web.py examples\todo_web.kl    -o dist\web\todo_web
 ```
 
 ## 已知注意事项
 
-- **增量缓存陷阱**：`kaulac` 的增量缓存对 `import` 变更可能失效——修改 `webui\` / `backends\` 下的核心 `.kl` 后，务必使用 `--no-cache` 重新编译（`build_web.py` 默认即 `--no-cache`；native 手工编译时请自行附加），否则可能链到旧产物。
+- **增量缓存陷阱**：`kaulac` 的增量缓存对 `import` 变更可能失效——修改 `webui\` / `backends\` 下的核心 `.kl` 后，务必使用 `--no-cache` 重新编译（`build_native.py` / `build_web.py` 均已默认 `--no-cache`；手工编译时请自行附加），否则可能链到旧产物。
 - **KMM 池为编译期静态估算**：全局池容量按 AST 静态估算（本项目实测 2MB），作用域回卷仅复用 thread heap。切勿写 O(n²) 逐字符字符串拼接——一帧 ~2KB 视图的逐字符 churn 即可耗尽池（`string_concat` 返回 NULL）。框架内 `bridge.kl` 的 `kw_js_quote` 已按「两遍扫描 + 一次定长分配」修复，参见其注释；用户代码同理：批量字符串请用两遍法或 `std.string.string_concat` 控制分配次数。
 - **handler/局部变量约定**：事件 handler 必须是无捕获具名函数（Kaula 带捕获 lambda 不能作 C 回调）；应用状态以全局变量自管；函数指针一律以 `as<cstring>(函数名)` 传递。
 - **webview 注入脚本长度**：`webview_init` 注入脚本实测超过约 512 字节会被截断（见 `backend_webview.kl` 与 `counter_native.kl` 注释）。
