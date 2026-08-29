@@ -1,0 +1,31 @@
+# ============================================================
+# types.kl — Kaula WebUI 共享类型层
+# ------------------------------------------------------------
+# kaulac 实测约束（本文件设计依据）：
+#   - struct 可跨文件定义并在导出函数签名中使用（含 string/bool 字段）
+#   - enum / 泛型函数 不能出现在函数签名（C 前置声明早于 typedef，
+#     codegen bug），故枚举仅在单文件内部作 ADT 局部建模使用
+#   - 泛型 struct 需用字面量 { .field = v } 初始化，勿用构造器语法
+# ============================================================
+
+# 事件解析结果：bridge.kl 单次 JSON 解析的产物，跨字段一次性提取，
+# 避免 kw_event 对同一 payload 重复 json_parse 三次
+struct ParsedEvent {
+    kid: int,
+    typ: string,
+    val: string,
+    ok: bool
+}
+
+# 渲染下发结果：首帧 show_html / 后续 eval_js 的统一描述
+struct FrameOut {
+    body: string,
+    first: bool,
+    sent: bool
+}
+
+# 平台能力查询结果（后端注册时随 bridge_register 一并登记）
+struct PlatformCaps {
+    has_show: bool,
+    has_eval: bool
+}

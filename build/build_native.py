@@ -48,9 +48,15 @@ EXAMPLES = """\
 
 
 def default_compiler_dir() -> Path:
-    """脚本位于 kaula-webui/build/，编译器在 ../../kaula/kaula-compiler。"""
+    """脚本位于 kaula-webui/build/，当前编译器实际位于 ../../kaula/ 下的 kaulac.exe。"""
     script_dir = Path(__file__).resolve().parent
-    return script_dir.parent.parent / "kaula" / "kaula-compiler"
+    root_dir = script_dir.parent.parent / "kaula"
+    if (root_dir / "kaulac.exe").is_file():
+        return root_dir
+    compiler_dir = root_dir / "kaula-compiler"
+    if (compiler_dir / "kaulac.exe").is_file():
+        return compiler_dir
+    return root_dir
 
 
 def default_output_dir() -> Path:
@@ -80,6 +86,35 @@ def parse_args() -> argparse.Namespace:
         help="kaula-compiler 目录（默认自动定位：脚本上级目录的 ../kaula/kaula-compiler）",
     )
     return parser.parse_args()
+
+
+def find_vc_dev_cmd() -> Path | None:
+    """查找 VS 的 vcvars64.bat / VsDevCmd.bat，优先返回可用于激活 MSVC 环境的脚本。"""
+    candidates = [
+        Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"),
+        Path(r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"),
+        Path(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"),
+        Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"),
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+
+    # VsDevCmd.bat 依赖 vswhere.exe，它通常位于 VS Installer 目录；如果缺失，说明安装不完整。
+    installer_dir = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer")
+    if not installer_dir.is_dir():
+        installer_dir = Path(r"C:\Program Files\Microsoft Visual Studio\Installer")
+    vswhere = installer_dir / "vswhere.exe"
+    if vswhere.is_file():
+        for p in [
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat"),
+            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"),
+        ]:
+            if p.is_file():
+                return p
+    return None
 
 
 def main() -> int:
@@ -114,9 +149,26 @@ def main() -> int:
     print(f"[build] cwd        = {compiler_dir}")
     print(f"[build] source     = {rel}")
     print(f"[build] output-dir = {out_dir}")
-    # 默认 --no-cache：增量缓存对 import 变更失效（见文件头）；
-    # kaulac stderr 的 [SEMA DEBUG] 不影响判定，只看 returncode
-    proc = subprocess.run([str(kaulac), "--no-cache", rel], cwd=str(compiler_dir))
+
+    vc_env = find_vc_dev_cmd()
+    command = [str(kaulac), "--no-cache", rel]
+    if vc_env is not None:
+        installer_dir = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer")
+        if not installer_dir.is_dir():
+            installer_dir = Path(r"C:\Program Files\Microsoft Visual Studio\Installer")
+        installer_dir = str(installer_dir)
+        cmd = (
+            f'cmd /d /s /c "set PATH=%PATH%;{installer_dir} && call \"{vc_env}\" >nul && '
+            f'\"{kaulac}\" --no-cache --target-triple x86_64-pc-windows-msvc \"{rel}\""'
+        )
+        print(f"[build] activating VC toolchain: {vc_env}")
+        proc = subprocess.run(cmd, cwd=str(compiler_dir), shell=True)
+    else:
+        print("[build] warning: no VS vcvars64.bat/VsDevCmd.bat found; native webview link may fail without a configured MSVC toolchain.")
+        # 默认 --no-cache：增量缓存对 import 变更失效（见文件头）；
+        # kaulac stderr 的 [SEMA DEBUG] 不影响判定，只看 returncode
+        proc = subprocess.run(command, cwd=str(compiler_dir))
+
     if proc.returncode != 0:
         print(f"错误: kaulac compile failed (exit {proc.returncode})", file=sys.stderr)
         return proc.returncode

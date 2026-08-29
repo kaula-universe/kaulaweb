@@ -54,7 +54,20 @@ for _stream in (sys.stdout, sys.stderr):
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))          # kaula-webui\build
 WEBUI_DIR = os.path.dirname(SCRIPT_DIR)                          # kaula-webui
 REPO_ROOT = os.path.dirname(WEBUI_DIR)                           # 工作区根
-COMPILER_DIR = os.path.join(REPO_ROOT, 'kaula', 'kaula-compiler')
+
+
+def default_compiler_dir():
+    """编译器定位：kaulac.exe 现已直接位于 kaula\ 下（旧 kaula-compiler 布局兼容保留）。"""
+    root_dir = os.path.join(REPO_ROOT, 'kaula')
+    if os.path.isfile(os.path.join(root_dir, 'kaulac.exe')):
+        return root_dir
+    legacy_dir = os.path.join(root_dir, 'kaula-compiler')
+    if os.path.isfile(os.path.join(legacy_dir, 'kaulac.exe')):
+        return legacy_dir
+    return root_dir
+
+
+COMPILER_DIR = default_compiler_dir()
 KAULA_SRC_DIR = os.path.join(REPO_ROOT, 'kaula', 'src')
 KAULA_STD_DIR = os.path.join(REPO_ROOT, 'kaula', 'std')
 WASM_SHIM_C = os.path.join(WEBUI_DIR, 'backends', 'wasm_shim.c')

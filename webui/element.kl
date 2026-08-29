@@ -38,6 +38,8 @@ fn kw_hook_call(int handle, cstring ev, cstring handler) int {
 }
 
 # ---------- HTML 转义 ----------
+# 注：StringBuilder 类型未注册进 kaulac sema（局部声明报"未知类型"），
+# 且类方法/顶层函数均不可用；char 循环 concat 是当前编译器下的可行实现
 export fn kw_escape_html(string s) string {
     string out = std.string.string_create("")
     size_t n = std.string.string_length(s)
@@ -63,6 +65,8 @@ export fn kw_escape_html(string s) string {
 }
 
 # 自闭合（void）标签：不输出文本/子节点/闭合标签
+# （标签集合固定且极小，if 链即可；HashMap 方案因 string 字面量生命周期
+#   与初始化时序引入不必要的全局状态，已回退）
 fn kw_is_void_tag(string t) bool {
     if (std.string.string_equals(t, "input")) {
         return true

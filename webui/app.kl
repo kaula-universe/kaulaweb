@@ -40,6 +40,7 @@ int G_KID_SEQ = 0
 RenderFn G_RENDER
 
 # 超限/异常日志落盘
+# （std.logging 实测未纳入 kaulac 自动链接，链接期 undefined symbol，故保留文件实现）
 fn kw_log_error(string msg) void {
     void() f = std.io.file_open("kw_error.log", "a")
     if (f == null) {
@@ -109,6 +110,24 @@ export fn kw_init() void {
 export fn kw_on(int elem_handle, string event_type, cstring handler) int {
     cstring ev = event_type.ptr
     return kw_on_impl(elem_handle, ev, handler)
+}
+
+# 仅分配 kid、不注册事件：用于需要 JS 侧定位（data-kid 属性）但无事件的元素，
+# 供增量渲染（每帧补丁更新 style/textContent）使用。kid 序列与 kw_on 共用。
+export fn kw_bind(int elem_handle) int {
+    kw_registry_init()
+    size_t n = std.container.vector_size(G_REGISTRY)
+    if (n >= KW_MAX_KID) {
+        kw_log_error("[kaula-webui] registry overflow: kid limit 1024 reached, bind dropped")
+        return -1
+    }
+    int kid = kw_elem_get_kid(elem_handle)
+    if (kid < 0) {
+        kid = G_KID_SEQ
+        G_KID_SEQ = G_KID_SEQ + 1
+        kw_elem_set_kid(elem_handle, kid)
+    }
+    return kid
 }
 
 # ---------- 渲染回调 ----------

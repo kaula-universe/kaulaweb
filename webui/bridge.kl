@@ -7,18 +7,46 @@
 #
 # 事件协议（JS -> native）：
 #   window.kaula_event('{"kid":"N","type":"click","value":"..."}')
-#   native 后端 bind 回调解包 webview 数组包装后调 kw_event；
+#   native 后端 bind 回解开包 webview 数组包装后调 kw_event；
 #   WASM 后端 shim 直接调 kw_event。
 #
 # 渲染管线：
 #   首帧  bridge_show_html(完整页面: 基础 CSS + #app + shell.js)
-#   后续  bridge_eval_js("kw_render('<转义后的 #app 内容>')")
+#   后续  bridge_eval_js("kw_render('<转义后的 #app 内容>')
 # ============================================================
 import std.io
 import std.string
+import std.json
+import "types.kl"
 import "element.kl"
 import "app.kl"
 import "shell.kl"
+
+# ---------- 事件种类 ADT（仅本文件内部使用） ----------
+# kaulac 实测：enum 不能出现在函数签名（codegen bug），故只作局部建模；
+# 收益：kw_wv_event_cb 的高频 tick 过滤与分发走 match，避免逐个 string_equals
+enum EvKind {
+    Click,
+    Input,
+    Change,
+    Submit,
+    Tick,
+    Other
+}
+
+# 字符串 -> EvKind（同文件内调用，enum 局部返回安全）
+fn ev_kind_of(string typ) EvKind {
+    EvKind k = EvKind.Other
+    match typ {
+        "click" => { k = EvKind.Click },
+        "input" => { k = EvKind.Input },
+        "change" => { k = EvKind.Change },
+        "submit" => { k = EvKind.Submit },
+        "tick" => { k = EvKind.Tick },
+        _ => { k = EvKind.Other }
+    }
+    return k
+}
 
 type PlatformFn = void(cstring) void;
 
@@ -50,79 +78,95 @@ export fn bridge_eval_js(string js) void {
 }
 
 # ---------- 最小 JSON 字段提取 ----------
-# std.json 注册表缺少 json_get_string/json_is_string（无法取值），
-# 故对受控协议 {"kid":"..","type":"..","value":".."} 做手写扫描。
-# 支持 \" \\ \n \t \r \b \f 转义；仅处理字符串值字段（协议约定）。
-# （浏览器 JSON.stringify 对 CR 必然输出 \r，多行输入场景可达，
-#   与 backends\backend_webview.kl 的 kw_wv_unwrap 解码能力对齐）
+# 使用 std.json 标准库（JsonValue 经 void() 承接，见 kw_json_parse_event 注）
+# JSON 协议字段名（String 变量：std.json extern 形参为 String 值结构体，
+# 直接传字面量生成的是 char*，ABI 不符；局部声明提升到函数顶层）
+string G_JK_KID = "kid"
+string G_JK_TYPE = "type"
+string G_JK_VALUE = "value"
+
 export fn kw_json_get(string json, string key) string {
-    string pat = std.string.string_create("\"")
-    pat = pat + key
-    pat = pat + "\""
-    size_t len = std.string.string_length(json)
-    size_t pos = std.string.string_index_of_string(json, pat)
-    if (pos >= len) {
+    void() root = std.json.json_parse(json)
+    if (root == null) {
         return std.string.string_create("")
     }
-    size_t plen = std.string.string_length(pat)
-    size_t i = pos + plen
-    # 跳过空白与冒号
-    bool scan = true
-    while (scan) {
-        if (i >= len) {
-            return std.string.string_create("")
-        }
-        char c = std.string.string_char_at(json, i)
-        if (c == ' ') {
-            i = i + 1
-        } else if (c == ':') {
-            i = i + 1
-        } else {
-            scan = false
-        }
-    }
-    char q = std.string.string_char_at(json, i)
-    if (q != '"') {
+    if (std.json.json_is_object(root) == 0) {
+        std.json.json_destroy(root)
         return std.string.string_create("")
     }
-    i = i + 1
-    string out = std.string.string_create("")
-    bool run = true
-    while (run) {
-        if (i >= len) {
-            run = false
-        } else {
-            char c = std.string.string_char_at(json, i)
-            if (c == '\\') {
-                i = i + 1
-                if (i >= len) {
-                    run = false
-                } else {
-                    char e = std.string.string_char_at(json, i)
-                    if (e == 'n') {
-                        out = out + "\n"
-                    } else if (e == 't') {
-                        out = out + "\t"
-                    } else if (e == 'r') {
-                        out = out + "\r"
-                    } else if (e == 'b') {
-                        out = out + "\b"
-                    } else if (e == 'f') {
-                        out = out + "\f"
-                    } else {
-                        out = std.string.string_concat_char(out, e)
-                    }
-                    i = i + 1
-                }
-            } else if (c == '"') {
-                run = false
-            } else {
-                out = std.string.string_concat_char(out, c)
-                i = i + 1
-            }
-        }
+    void() val = std.json.json_object_get(root, key)
+    if (val == null || std.json.json_is_string(val) == 0) {
+        std.json.json_destroy(root)
+        return std.string.string_create("")
     }
-    return out
+    string result = std.string.string_copy(std.json.json_get_string(val))
+    std.json.json_destroy(root)
+    return result
+}
+
+# ---------- JSON 批量字段提取（单次解析，避免重复解析开销） ----------
+# ParsedEvent 定义于 types.kl（跨文件 struct 实测可用）
+# JsonValue 以 void() 承接：std 限定类型名在局部声明处会原样泄漏进 C
+# （unknown type name），而 json_* 系列 extern 均以指针传参，void* ABI 兼容
+export fn kw_json_parse_event(string json) ParsedEvent {
+    ParsedEvent result = { .kid = -1, .typ = "", .val = "", .ok = false }
+
+    void() root = std.json.json_parse(json)
+    if (root == null) {
+        return result
+    }
+    if (std.json.json_is_object(root) == 0) {
+        std.json.json_destroy(root)
+        return result
+    }
+
+    # 提取 kid（协议兼容 string/number 两种形态）
+    void() kid_val = std.json.json_object_get(root, G_JK_KID)
+    if (kid_val == null) {
+        std.json.json_destroy(root)
+        return result
+    }
+    int kid_num = -1
+    if (std.json.json_is_string(kid_val) != 0) {
+        kid_num = as<int>(std.string.string_to_int(std.json.json_get_string(kid_val)))
+    } else if (std.json.json_is_number(kid_val) != 0) {
+        kid_num = as<int>(std.json.json_get_number(kid_val))
+    } else {
+        std.json.json_destroy(root)
+        return result
+    }
+    result.kid = kid_num
+
+    # 提取 type
+    void() type_val = std.json.json_object_get(root, G_JK_TYPE)
+    if (type_val != null && std.json.json_is_string(type_val) != 0) {
+        result.typ = std.string.string_copy(std.json.json_get_string(type_val))
+    }
+
+    # 提取 value
+    void() value_val = std.json.json_object_get(root, G_JK_VALUE)
+    if (value_val != null && std.json.json_is_string(value_val) != 0) {
+        result.val = std.string.string_copy(std.json.json_get_string(value_val))
+    }
+
+    result.ok = true
+    std.json.json_destroy(root)
+    return result
+}
+
+# 兼容入口：单字段读取（内部仍走单次解析路径的封装）
+export fn kw_json_has(string json, string key) bool {
+    void() root = std.json.json_parse(json)
+    if (root == null) {
+        return false
+    }
+    bool has = false
+    if (std.json.json_is_object(root) != 0) {
+        void() val = std.json.json_object_get(root, key)
+        has = val != null
+    }
+    std.json.json_destroy(root)
+    return has
 }
 
 # ---------- 统一事件入口 ----------
@@ -131,31 +175,34 @@ export fn kw_json_get(string json, string key) string {
 # 长寿命幸存段。kw_event 无 #[no_kmm]，编译器包 KMM 作用域：旧版
 # string_create(json) 的载荷随 kw_event 返回 scope_pop 回卷，handler 内
 # 跨调用持有的引用（如 backend_wasm 的 G_NAME）全靠 alloc_auto 慢路径
-# 偶然落幸存段才“能用”；现改为确定性长活。不加 #[no_kmm]：它会把
+# 偶然落幸存段才"能用"；现改为确定性长活。不加 #[no_kmm]：它会把
 # 全部解析/渲染临时分配也永久留在池内（泄漏式），长寿命拷贝是改动最小、
 # 语义最清晰的确定性方案。native 侧（wv_event_cb -> kw_wv_drain 同步调
 # 入）仅略增 survivor 占用，语义安全。
+# 性能优化：使用 kw_json_parse_event 单次解析，避免多次调用 kw_json_get 重复解析
 export fn kw_event(cstring json) void {
     string s = std.string.string_create_global(json)
-    string kid_s = kw_json_get(s, "kid")
-    if (std.string.string_is_empty(kid_s)) {
+    ParsedEvent ev = kw_json_parse_event(s)
+    if (!ev.ok) {
         return
     }
-    string typ = kw_json_get(s, "type")
-    string val = kw_json_get(s, "value")
-    int kid = as<int>(std.string.string_to_int(kid_s))
-    kw_dispatch_event(kid, typ, val)
+    # EvKind 分类：高频 tick 与普通事件走同一分发入口，
+    # 分类结果供后续按种类做差异化处理（如 tick 跳过日志）
+    EvKind kind = ev_kind_of(ev.typ)
+    if (kind == EvKind.Other && std.string.string_is_empty(ev.typ)) {
+        return
+    }
+    kw_dispatch_event(ev.kid, ev.typ, ev.val)
 }
 
 # ---------- JS 字符串字面量转义 ----------
 # 把 html 包成合法的 JS 单行字符串字面量（含首尾双引号）
 #
 # 两遍扫描 + 一次定长分配（string_realloc）+ string_set_char_at 逐字填充：
-# 早期版本逐字符 concat（O(n²) 分配量），而 KMM V4 全局池 offset 单调递增、
-# 作用域回卷仅复用 thread heap——编译器按 AST 静态估算池容量（本项目实测
-# 2MB），一帧 ~2KB 视图的逐字符 churn 即耗 ~2MB，第二次 bridge_refresh
-# 即池耗尽，string_concat 返回 ptr=NULL（即 "eval frame: js is NULL"）。
-# 现改为 O(n) 分配：第一遍统计转义后长度，一次分配到位后原地填字。
+# 逐字符 concat 是 O(n²) 分配量，而 KMM V4 全局池 offset 单调递增、
+# 作用域回卷仅复用 thread heap——编译器按 AST 静态估算池容量，一帧视图的
+# 逐字符 churn 即可耗尽池导致 string_concat 返回 NULL。StringBuilder 类型
+# 未注册进 sema 不可用，两遍法是当前编译器下的 O(n) 方案。
 fn kw_js_quote(string s) string {
     # 全部局部提升到函数顶层（块内声明触发 KMM 作用域回卷）
     size_t n = std.string.string_length(s)
@@ -178,9 +225,9 @@ fn kw_js_quote(string s) string {
         i = i + 1
     }
     out = std.string.string_realloc(out, need)
-    # string_realloc 失败返回 {.len=need,.ptr=NULL}，而 string_set_char_at
+    # realloc 失败返回 {.len=need,.ptr=NULL}，而 string_set_char_at
     # 只查 index<len 不查 ptr——不判空即向 NULL 写入。此时返回空串，
-    # 由 kw_send 检测后跳过本帧（对齐旧版 "js is NULL 跳过" 行为）。
+    # 由 kw_send 检测后跳过本帧。
     if (out.ptr == null) {
         return std.string.string_create("")
     }
@@ -218,6 +265,7 @@ fn kw_js_quote(string s) string {
 # ---------- 异常日志落盘 ----------
 # 函数名带 bridge 前缀：非 export 函数与 app.kl 同编入一个 C 翻译单元，
 # 同名（如 kw_log_error）会 redefinition。
+# （std.logging 实测未纳入 kaulac 自动链接，链接期 undefined symbol）
 fn kw_bridge_log(string msg) void {
     void() f = std.io.file_open("kw_bridge.log", "a")
     if (f == null) {
