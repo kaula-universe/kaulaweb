@@ -1,0 +1,573 @@
+# ============================================================
+# webui.kl — Kaula WebUI 框架（单文件合并版）
+# ------------------------------------------------------------
+# 适配新编译器标准：所有核心模块合并为单文件，
+# 避免跨文件 export/adopt 类型的 K_ 前缀传播问题。
+#
+# 对外 API：
+#   元素树：kw_elem/kw_div/kw_span/kw_button/kw_p/kw_input/kw_form
+#           kw_set_text/kw_set_attr/kw_set_style_str/kw_set_style/kw_add
+#           kw_render_elem/kw_escape_html
+#   样式构建器：kw_style/kw_sty_*/kw_style_css
+#   事件：kw_on/kw_dispatch_event/kw_event/kw_registry_size
+#   应用：kw_init/app_set_render/app_render_html
+#   桥接：bridge_register/bridge_show_html/bridge_eval_js
+#         bridge_render/bridge_refresh/kw_start
+#   JSON：kw_json_get/kw_json_has/kw_json_parse_event
+#   Shell：kw_shell_js
+# ============================================================
+import std.io
+import std.string
+import std.container
+import std.memory
+
+# ========== 类型层 ==========
+# C 可变字符串（char*）—— 函数指针传递、string.ptr 赋值、FFI 边界
+type cstring = adopt char*
+# 渲染回调：无参返回 HTML 片段指针（用 int 存储函数指针）
+type RenderFn = int
+# 事件处理器 / 平台函数：接收 string 参数（用 int 存储函数指针）
+type EventFn = int
+
+# C 辅助函数：调用函数指针（Kaula 不支持直接调用函数指针）
+extern fn kw_call_render(fn_ptr: int) -> string
+extern fn kw_call_event(fn_ptr: int, arg: string) -> void
+
+# ========== 样式构建器 ==========
+struct Style {
+    css: string
+}
+
+struct StylePool {
+    pool: Style*,
+    count: int,
+    cap: int
+}
+StylePool G_STYLE
+
+fn style_pool_ensure() void {
+    if (G_STYLE.pool == null) {
+        G_STYLE.cap = 32
+        G_STYLE.pool = as<Style*>(std.memory.kmm_v4_calloc(G_STYLE.cap, 16))
+    }
+    if (G_STYLE.count >= G_STYLE.cap) {
+        int new_cap = G_STYLE.cap * 2
+        Style* new_pool = as<Style*>(std.memory.kmm_v4_calloc(new_cap, 16))
+        for i in range(G_STYLE.count) {
+            new_pool[i] = G_STYLE.pool[i]
+        }
+        G_STYLE.pool = new_pool
+        G_STYLE.cap = new_cap
+    }
+}
+
+fn kw_style_create() int {
+    style_pool_ensure()
+    int h = G_STYLE.count
+    G_STYLE.count = G_STYLE.count + 1
+    G_STYLE.pool[h] = Style()
+    return h
+}
+
+pub fn kw_style() int {
+    return kw_style_create()
+}
+
+fn kw_sty_append(int h, string k, string v) void {
+    string cur = G_STYLE.pool[h].css
+    string part1 = std.string.string_concat(cur, k)
+    string part2 = std.string.string_concat(part1, std.string.string_create(":"))
+    string part3 = std.string.string_concat(part2, v)
+    G_STYLE.pool[h].css = std.string.string_concat(part3, std.string.string_create(";"))
+}
+
+pub fn kw_sty_bg(int h, string c) void {
+    kw_sty_append(h, std.string.string_create("background"), c)
+}
+pub fn kw_sty_color(int h, string c) void {
+    kw_sty_append(h, std.string.string_create("color"), c)
+}
+pub fn kw_sty_pad(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("padding"), v)
+}
+pub fn kw_sty_margin(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("margin"), v)
+}
+pub fn kw_sty_rad(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("border-radius"), v)
+}
+pub fn kw_sty_border(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("border"), v)
+}
+pub fn kw_sty_font_sz(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("font-size"), v)
+}
+pub fn kw_sty_font_w(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("font-weight"), v)
+}
+pub fn kw_sty_display(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("display"), v)
+}
+pub fn kw_sty_flex_dir(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("flex-direction"), v)
+}
+pub fn kw_sty_align(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("align-items"), v)
+}
+pub fn kw_sty_justify(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("justify-content"), v)
+}
+pub fn kw_sty_gap(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("gap"), v)
+}
+pub fn kw_sty_text_align(int h, string v) void {
+    kw_sty_append(h, std.string.string_create("text-align"), v)
+}
+
+pub fn kw_style_css(int h) string {
+    return G_STYLE.pool[h].css
+}
+
+# ========== 元素树 ==========
+struct Elem {
+    tag: string
+    text: string
+    attr: string
+    style_css: string
+    kids: int*
+    kid_count: int
+    kid_cap: int
+}
+
+struct ElemPool {
+    pool: Elem*,
+    count: int,
+    cap: int
+}
+ElemPool G_ELEM
+
+fn elem_pool_ensure() void {
+    if (G_ELEM.pool == null) {
+        G_ELEM.cap = 64
+        G_ELEM.pool = as<Elem*>(std.memory.kmm_v4_calloc(G_ELEM.cap, 32))
+    }
+    if (G_ELEM.count >= G_ELEM.cap) {
+        int new_cap = G_ELEM.cap * 2
+        Elem* new_pool = as<Elem*>(std.memory.kmm_v4_calloc(new_cap, 32))
+        for i in range(G_ELEM.count) {
+            new_pool[i] = G_ELEM.pool[i]
+        }
+        G_ELEM.pool = new_pool
+        G_ELEM.cap = new_cap
+    }
+}
+
+pub fn kw_elem(string tag) int {
+    elem_pool_ensure()
+    int h = G_ELEM.count
+    G_ELEM.count = G_ELEM.count + 1
+    G_ELEM.pool[h] = Elem()
+    G_ELEM.pool[h].tag = tag
+    return h
+}
+
+pub fn kw_div() int {
+    return kw_elem(std.string.string_create("div"))
+}
+
+pub fn kw_span() int {
+    return kw_elem(std.string.string_create("span"))
+}
+
+pub fn kw_button(string text) int {
+    int h = kw_elem(std.string.string_create("button"))
+    G_ELEM.pool[h].text = text
+    return h
+}
+
+pub fn kw_p(string text) int {
+    int h = kw_elem(std.string.string_create("p"))
+    G_ELEM.pool[h].text = text
+    return h
+}
+
+pub fn kw_input(string typ) int {
+    int h = kw_elem(std.string.string_create("input"))
+    G_ELEM.pool[h].attr = std.string.string_create("type=\"") + typ + std.string.string_create("\"")
+    return h
+}
+
+pub fn kw_form() int {
+    return kw_elem(std.string.string_create("form"))
+}
+
+pub fn kw_set_text(int h, string t) void {
+    G_ELEM.pool[h].text = t
+}
+
+pub fn kw_set_attr(int h, string raw) void {
+    G_ELEM.pool[h].attr = raw
+}
+
+pub fn kw_set_style_str(int h, string css) void {
+    G_ELEM.pool[h].style_css = css
+}
+
+pub fn kw_set_style(int h, int style_handle) void {
+    G_ELEM.pool[h].style_css = kw_style_css(style_handle)
+}
+
+pub fn kw_add(int parent, int child) void {
+    Elem* p = &G_ELEM.pool[parent]
+    if (p.kid_count >= p.kid_cap) {
+        int new_cap = p.kid_cap + 8
+        int* new_kids = as<int*>(std.memory.kmm_v4_calloc(new_cap, 4))
+        for i in range(p.kid_count) {
+            new_kids[i] = p.kids[i]
+        }
+        p.kids = new_kids
+        p.kid_cap = new_cap
+    }
+    p.kids[p.kid_count] = child
+    p.kid_count = p.kid_count + 1
+}
+
+pub fn kw_elem_set_kid(int h, int kid) void {
+    G_ELEM.pool[h].kid_count = 1
+    if (G_ELEM.pool[h].kids == null) {
+        G_ELEM.pool[h].kids = as<int*>(std.memory.kmm_v4_calloc(1, 4))
+        G_ELEM.pool[h].kid_cap = 1
+    }
+    G_ELEM.pool[h].kids[0] = kid
+}
+
+pub fn kw_elem_get_kid(int h) int {
+    if (G_ELEM.pool[h].kid_count > 0) {
+        return G_ELEM.pool[h].kids[0]
+    }
+    return -1
+}
+
+# HTML 转义
+pub fn kw_escape_html(string s) string {
+    string result = std.string.string_create("")
+    int len = std.string.string_length(s)
+    for i in range(len) {
+        u8 c = std.string.string_char_at(s, i)
+        if (c == 60) {
+            result = result + std.string.string_create("&lt;")
+        } else if (c == 62) {
+            result = result + std.string.string_create("&gt;")
+        } else if (c == 38) {
+            result = result + std.string.string_create("&amp;")
+        } else if (c == 34) {
+            result = result + std.string.string_create("&quot;")
+        } else {
+            string ch = std.string.string_create_from_char(as<char>(c))
+            result = result + ch
+        }
+    }
+    return result
+}
+
+fn kw_is_void_tag(string t) bool {
+    return std.string.string_equals(t, std.string.string_create("input")) ||
+           std.string.string_equals(t, std.string.string_create("br")) ||
+           std.string.string_equals(t, std.string.string_create("hr")) ||
+           std.string.string_equals(t, std.string.string_create("img"))
+}
+
+fn kw_render_children(int h) string {
+    string result = std.string.string_create("")
+    Elem* e = &G_ELEM.pool[h]
+    for i in range(e.kid_count) {
+        result = result + kw_render_elem(e.kids[i])
+    }
+    return result
+}
+
+pub fn kw_render_elem(int h) string {
+    Elem* e = &G_ELEM.pool[h]
+    string html = std.string.string_create("<") + e.tag
+    if (as<int>(std.string.string_length(e.attr)) > 0) {
+        html = html + std.string.string_create(" ") + e.attr
+    }
+    if (as<int>(std.string.string_length(e.style_css)) > 0) {
+        html = html + std.string.string_create(" style=\"") + e.style_css + std.string.string_create("\"")
+    }
+    html = html + std.string.string_create(">")
+    if (kw_is_void_tag(e.tag)) {
+        return html
+    }
+    if (as<int>(std.string.string_length(e.text)) > 0) {
+        html = html + kw_escape_html(e.text)
+    }
+    html = html + kw_render_children(h)
+    html = html + std.string.string_create("</") + e.tag + std.string.string_create(">")
+    return html
+}
+
+# ========== 事件注册表 ==========
+struct Registry {
+    kid: int*,
+    typ: string*,
+    handler: int*,
+    size: int,
+    cap: int
+}
+Registry G_REG
+
+fn registry_ensure() void {
+    if (G_REG.kid == null) {
+        G_REG.cap = 32
+        G_REG.kid = as<int*>(std.memory.kmm_v4_calloc(G_REG.cap, 4))
+        G_REG.typ = as<string*>(std.memory.kmm_v4_calloc(G_REG.cap, 16))
+        G_REG.handler = as<int*>(std.memory.kmm_v4_calloc(G_REG.cap, 8))
+    }
+}
+
+pub fn kw_registry_init() void {
+    G_REG.size = 0
+}
+
+pub fn kw_registry_reset() void {
+    G_REG.size = 0
+}
+
+pub fn kw_registry_size() int {
+    return G_REG.size
+}
+
+pub fn kw_on(int elem_handle, string event_type, int handler) int {
+    registry_ensure()
+    if (G_REG.size >= G_REG.cap) {
+        int new_cap = G_REG.cap * 2
+        int* nk = as<int*>(std.memory.kmm_v4_calloc(new_cap, 4))
+        string* nt = as<string*>(std.memory.kmm_v4_calloc(new_cap, 16))
+        int* nh = as<int*>(std.memory.kmm_v4_calloc(new_cap, 8))
+        for i in range(G_REG.size) {
+            nk[i] = G_REG.kid[i]
+            nt[i] = G_REG.typ[i]
+            nh[i] = G_REG.handler[i]
+        }
+        G_REG.kid = nk
+        G_REG.typ = nt
+        G_REG.handler = nh
+        G_REG.cap = new_cap
+    }
+    int kid = G_REG.size
+    G_REG.size = G_REG.size + 1
+    G_REG.kid[kid] = elem_handle
+    G_REG.typ[kid] = event_type
+    G_REG.handler[kid] = handler
+    return kid
+}
+
+pub fn kw_bind(int elem_handle) int {
+    return elem_handle
+}
+
+pub fn kw_dispatch_event(int kid, string event_type, string value) void {
+    for i in range(G_REG.size) {
+        if (G_REG.kid[i] == kid && std.string.string_equals(G_REG.typ[i], event_type)) {
+            kw_call_event(G_REG.handler[i], value)
+            return
+        }
+    }
+}
+
+# ========== 应用层 ==========
+struct AppState {
+    render: int,
+    show_fn: int,
+    eval_fn: int,
+    first_frame: int
+}
+AppState G_APP
+
+pub fn kw_init() void {
+    G_ELEM.count = 0
+    G_STYLE.count = 0
+    G_REG.size = 0
+}
+
+pub fn app_set_render(RenderFn fn_ptr) void {
+    G_APP.render = fn_ptr
+}
+
+pub fn app_render_html() string {
+    return kw_call_render(G_APP.render)
+}
+
+pub fn app_refresh() string {
+    G_REG.size = 0
+    return app_render_html()
+}
+
+# ========== JSON 工具 ==========
+# 从指定位置开始查找子串
+fn index_of_from(string s, string sub, int from) int {
+    int slen = as<int>(std.string.string_length(s))
+    if (from >= slen) {
+        return -1
+    }
+    string rest = std.string.string_substring(s, from, slen - from)
+    int idx = std.string.string_index_of_string(rest, sub)
+    if (idx < 0) {
+        return -1
+    }
+    return idx + from
+}
+
+pub fn kw_json_get(string json, string key) string {
+    string search = std.string.string_create("\"") + key + std.string.string_create("\":\"")
+    int start = std.string.string_index_of_string(json, search)
+    if (start < 0) {
+        # 尝试数字值（无引号）
+        string search_num = std.string.string_create("\"") + key + std.string.string_create("\":")
+        int sn = std.string.string_index_of_string(json, search_num)
+        if (sn < 0) {
+            return std.string.string_create("")
+        }
+        int vs = sn + as<int>(std.string.string_length(search_num))
+        int comma = index_of_from(json, std.string.string_create(","), vs)
+        int brace = index_of_from(json, std.string.string_create("}"), vs)
+        int end = comma
+        if (brace >= 0 && (end < 0 || brace < end)) {
+            end = brace
+        }
+        if (end < 0) {
+            end = as<int>(std.string.string_length(json))
+        }
+        return std.string.string_substring(json, vs, end - vs)
+    }
+    int val_start = start + as<int>(std.string.string_length(search))
+    int end = index_of_from(json, std.string.string_create("\""), val_start)
+    if (end < 0) {
+        return std.string.string_create("")
+    }
+    return std.string.string_substring(json, val_start, end - val_start)
+}
+
+pub fn kw_json_has(string json, string key) int {
+    string search = std.string.string_create("\"") + key + std.string.string_create("\":")
+    return as<int>(std.string.string_index_of_string(json, search)) >= 0
+}
+
+# 解析事件 JSON：kid/type/value
+struct ParsedEvent {
+    kid: int,
+    typ: string,
+    val: string,
+    ok: int
+}
+
+pub fn kw_json_parse_event(string json) ParsedEvent {
+    ParsedEvent ev
+    ev.kid = -1
+    ev.typ = std.string.string_create("")
+    ev.val = std.string.string_create("")
+    ev.ok = 0
+    if (kw_json_has(json, std.string.string_create("kid")) == 0) {
+        return ev
+    }
+    string kid_str = kw_json_get(json, std.string.string_create("kid"))
+    ev.kid = std.string.string_to_int(kid_str)
+    ev.typ = kw_json_get(json, std.string.string_create("type"))
+    ev.val = kw_json_get(json, std.string.string_create("value"))
+    ev.ok = 1
+    return ev
+}
+
+pub fn kw_event(string json) void {
+    ParsedEvent ev = kw_json_parse_event(json)
+    if (ev.ok == 0) {
+        return
+    }
+    kw_dispatch_event(ev.kid, ev.typ, ev.val)
+}
+
+# ========== 桥接层 ==========
+
+pub fn bridge_register(EventFn show_fn, EventFn eval_fn) void {
+    G_APP.show_fn = as<int>(show_fn)
+    G_APP.eval_fn = as<int>(eval_fn)
+}
+
+pub fn bridge_show_html(string html) void {
+    kw_call_event(G_APP.show_fn, html)
+}
+
+pub fn bridge_eval_js(string js) void {
+    kw_call_event(G_APP.eval_fn, js)
+}
+
+# JS 字符串转义（用于 kw_render("...") 中的 HTML）
+fn kw_js_quote(string s) string {
+    string result = std.string.string_create("")
+    int len = std.string.string_length(s)
+    for i in range(len) {
+        u8 c = std.string.string_char_at(s, i)
+        if (c == 92) {
+            result = result + std.string.string_create("\\\\")
+        } else if (c == 34) {
+            result = result + std.string.string_create("\\\"")
+        } else if (c == 10) {
+            result = result + std.string.string_create("\\n")
+        } else if (c == 13) {
+            result = result + std.string.string_create("\\r")
+        } else {
+            string ch = std.string.string_create_from_char(as<char>(c))
+            result = result + ch
+        }
+    }
+    return result
+}
+
+fn kw_base_css() string {
+    return std.string.string_create("#app{min-height:100vh;margin:0;padding:0;box-sizing:border-box;}")
+}
+
+pub fn kw_page(string inner) string {
+    string css = kw_base_css()
+    string shell = kw_shell_js()
+    string page = std.string.string_create("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>") + css + std.string.string_create("</style></head><body><div id=\"app\">") + inner + std.string.string_create("</div>") + shell + std.string.string_create("</body></html>")
+    return page
+}
+
+fn kw_send(string inner) void {
+    if (G_APP.first_frame == 1) {
+        G_APP.first_frame = 0
+        string page = kw_page(inner)
+        bridge_show_html(page)
+    } else {
+        string js = std.string.string_create("kw_render(\"") + kw_js_quote(inner) + std.string.string_create("\")")
+        bridge_eval_js(js)
+    }
+}
+
+pub fn bridge_render() void {
+    string html = app_render_html()
+    kw_send(html)
+}
+
+pub fn bridge_refresh() void {
+    # 刷新前重建注册表（view 每帧全量重建，kid 重新分配）
+    G_REG.size = 0
+    string html = app_render_html()
+    kw_send(html)
+}
+
+pub fn kw_start() void {
+    # 首帧已由 bridge_render 发送，此处为后端 run loop 的占位
+}
+
+# ========== Shell JS ==========
+pub fn kw_shell_js() string {
+    string s1 = std.string.string_create("<script>window.kw_render=function(h){var a=document.getElementById('app');if(a)a.innerHTML=h;};")
+    string s2 = std.string.string_create("document.addEventListener('submit',function(e){e.preventDefault();});")
+    string s3 = std.string.string_create("window.kaula_event=function(d){if(window.fetch){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});}};")
+    string s4 = std.string.string_create("document.addEventListener('click',function(e){var t=e.target;if(t&&t.dataset&&t.dataset.kid){window.kaula_event({kid:t.dataset.kid,type:'click',value:''});}});")
+    string s5 = std.string.string_create("document.addEventListener('input',function(e){var t=e.target;if(t&&t.dataset&&t.dataset.kid){window.kaula_event({kid:t.dataset.kid,type:'input',value:t.value});}});</script>")
+    return s1 + s2 + s3 + s4 + s5
+}
