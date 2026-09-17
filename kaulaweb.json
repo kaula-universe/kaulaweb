@@ -3,6 +3,7 @@
   "type": "kaula_native",
   "header": "",
   "headers": null,
+  "sources": ["webui/kw_helper.c"],
   "functions": {},
   "auto_generated": true,
   "generated_at": "2026-09-16T20:35:25+08:00"
